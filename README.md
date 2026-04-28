@@ -53,7 +53,7 @@ Use these client paths:
   open/close.
 - Use WebSocket binary streams attached to serial sessions for bidirectional
   byte-oriented workflows such as bootloading.
-- Use the Python SDK and MCP server over the daemon HTTP/WebSocket API.
+- Use the async Python SDK and MCP server over the daemon HTTP/WebSocket API.
 - Use API keys for HTTP/WebSocket reservation attribution.
 - Expect Unix socket reservations to use the built-in `socket:admin`
   attribution.
@@ -248,9 +248,9 @@ Use MCP tools for daemon-backed operations:
 - `close_serial`
 - `bootload_file`
 
-`open_serial` opens a daemon serial session and an MCP-owned WebSocket stream for
-the device ID. Use `read_serial`, `write_serial`, `close_serial`, and
-`bootload_file` with that same device ID.
+`open_serial` opens a daemon serial session and an MCP-owned async WebSocket
+stream for the device ID. Use `read_serial`, `write_serial`, `close_serial`,
+and `bootload_file` with that same device ID.
 
 ## Troubleshooting
 

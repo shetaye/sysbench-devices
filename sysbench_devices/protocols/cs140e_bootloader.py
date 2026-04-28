@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import struct
-import time
 from binascii import crc32
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
+
+import anyio
 
 from sysbench_devices.errors import SysbenchDevicesError
 
@@ -24,6 +26,8 @@ PRINT_STRING = 0xDDDDEEEE
 ARM_BASE = 0x8000
 CHUNK_SIZE = 4096
 
+PrintCallback = Callable[[str], object | Awaitable[object]]
+
 
 class BootloaderError(SysbenchDevicesError):
     """CS140E bootloader protocol failure."""
@@ -32,16 +36,12 @@ class BootloaderError(SysbenchDevicesError):
     http_status = 502
 
 
-class BootloaderReadTimeout(BootloaderError):
-    """Timed out while waiting for bootloader bytes."""
-
-
 class BootloaderStream(Protocol):
     """Minimal byte stream required by the bootloader protocol."""
 
-    def read(self, max_bytes: int = CHUNK_SIZE, timeout: float = 0.1) -> bytes: ...
+    async def read(self, max_bytes: int = CHUNK_SIZE) -> bytes: ...
 
-    def write(self, data: bytes) -> None: ...
+    async def write(self, data: bytes) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -72,112 +72,91 @@ class _BootloaderWire:
         self._stream = stream
         self._buffer = bytearray()
 
-    def get_u8(self, deadline: float, timeout_message: str) -> int:
+    async def get_u8(self) -> int:
         while not self._buffer:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BootloaderReadTimeout(timeout_message)
             try:
-                data = self._stream.read(max_bytes=CHUNK_SIZE, timeout=min(0.25, remaining))
-            except BootloaderReadTimeout:
-                continue
+                data = await self._stream.read(max_bytes=CHUNK_SIZE)
             except Exception as exc:
                 raise BootloaderError(f"bootloader read failed: {exc}") from exc
             if data:
                 self._buffer.extend(data)
+            else:
+                await anyio.lowlevel.checkpoint()
 
         byte = self._buffer[0]
         del self._buffer[0]
         return byte
 
-    def get_u32_raw(self, deadline: float, timeout_message: str) -> int:
-        b0 = self.get_u8(deadline, timeout_message)
-        b1 = self.get_u8(deadline, timeout_message)
-        b2 = self.get_u8(deadline, timeout_message)
-        b3 = self.get_u8(deadline, timeout_message)
+    async def get_u32_raw(self) -> int:
+        b0 = await self.get_u8()
+        b1 = await self.get_u8()
+        b2 = await self.get_u8()
+        b3 = await self.get_u8()
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
-    def get_op(self, deadline: float, timeout_message: str, on_print: Callable[[str], None] | None) -> int:
+    async def get_op(self, on_print: PrintCallback | None) -> int:
         while True:
-            op = self.get_u32_raw(deadline, timeout_message)
+            op = await self.get_u32_raw()
             if op != PRINT_STRING:
                 return op
 
             message = bytearray()
             while True:
-                byte = self.get_u8(deadline, timeout_message)
+                byte = await self.get_u8()
                 if byte == 0:
                     break
                 message.append(byte)
             if on_print is not None:
-                on_print(message.decode("utf-8", errors="replace"))
+                result = on_print(message.decode("utf-8", errors="replace"))
+                if inspect.isawaitable(result):
+                    await result
 
-    def put_u32(self, value: int) -> None:
-        self.put_bytes(struct.pack("<I", value))
+    async def put_u32(self, value: int) -> None:
+        await self.put_bytes(struct.pack("<I", value))
 
-    def put_bytes(self, data: bytes) -> None:
+    async def put_bytes(self, data: bytes) -> None:
         try:
-            self._stream.write(data)
+            await self._stream.write(data)
         except Exception as exc:
             raise BootloaderError(f"bootloader write failed: {exc}") from exc
 
 
-def bootload(
+async def bootload(
     stream: BootloaderStream,
     code: bytes,
-    timeout: float = 10.0,
     arm_base: int = ARM_BASE,
-    on_print: Callable[[str], None] | None = None,
+    on_print: PrintCallback | None = None,
 ) -> BootloadResult:
     """Upload a binary to a CS140E bootloader stream."""
 
     code_crc = crc32(code) & 0xFFFFFFFF
     prints: list[str] = []
 
-    def capture_print(message: str) -> None:
+    async def capture_print(message: str) -> None:
         prints.append(message)
         if on_print is not None:
-            on_print(message)
+            result = on_print(message)
+            if inspect.isawaitable(result):
+                await result
 
     wire = _BootloaderWire(stream)
-    target = struct.pack("<I", GET_PROG_INFO)
-    window = bytearray()
-    deadline = time.monotonic() + timeout
+    await _wait_for_get_prog_info(wire)
 
-    while True:
-        byte = wire.get_u8(deadline, "timeout waiting for GET_PROG_INFO")
-        window.append(byte)
-        if len(window) > len(target):
-            del window[0]
-        if bytes(window) == target:
-            break
+    await _send_program_info(wire, arm_base, len(code), code_crc)
 
-    wire.put_u32(PUT_PROG_INFO)
-    wire.put_u32(arm_base)
-    wire.put_u32(len(code))
-    wire.put_u32(code_crc)
-
-    deadline = time.monotonic() + timeout
-    while True:
-        op = wire.get_op(deadline, "timeout waiting for GET_CODE", capture_print)
-        if op == BOOT_ERROR:
-            raise BootloaderError("pi rejected program info")
-        if op != GET_PROG_INFO:
-            break
-
+    op = await _wait_for_code_request(wire, capture_print)
     if op != GET_CODE:
         raise BootloaderError(f"expected GET_CODE (0x{GET_CODE:08X}), got 0x{op:08X}")
 
-    echoed_crc = wire.get_u32_raw(deadline, "timeout waiting for CRC echo")
+    echoed_crc = await wire.get_u32_raw()
     if echoed_crc != code_crc:
         raise BootloaderError(f"CRC mismatch: sent 0x{code_crc:08X}, pi echoed 0x{echoed_crc:08X}")
 
-    wire.put_u32(PUT_CODE)
+    await wire.put_u32(PUT_CODE)
     for offset in range(0, len(code), CHUNK_SIZE):
-        wire.put_bytes(code[offset : offset + CHUNK_SIZE])
+        await wire.put_bytes(code[offset : offset + CHUNK_SIZE])
 
-    deadline = time.monotonic() + timeout
-    op = wire.get_op(deadline, "timeout waiting for BOOT_SUCCESS", capture_print)
+    op = await wire.get_op(capture_print)
     if op == BOOT_ERROR:
         raise BootloaderError("pi reported BOOT_ERROR after code transfer")
     if op != BOOT_SUCCESS:
@@ -192,16 +171,14 @@ def bootload(
     )
 
 
-def bootload_stream(
+async def bootload_stream(
     stream: BootloaderStream,
     payload: bytes,
-    timeout: float = 10.0,
     arm_base: int = ARM_BASE,
-    capture_output_seconds: float = 0.0,
     max_output_bytes: int = CHUNK_SIZE,
 ) -> BootloadResult:
-    result = bootload(stream, payload, timeout=timeout, arm_base=arm_base)
-    captured_output = _capture_output(stream, capture_output_seconds, max_output_bytes)
+    result = await bootload(stream, payload, arm_base=arm_base)
+    captured_output = await _capture_output(stream, max_output_bytes)
     return BootloadResult(
         device_id=getattr(stream, "device_id", None),
         bytes_sent=result.bytes_sent,
@@ -212,38 +189,59 @@ def bootload_stream(
     )
 
 
-def bootload_file(
+async def bootload_file(
     stream: BootloaderStream,
     path: str | Path,
-    timeout: float = 10.0,
     arm_base: int = ARM_BASE,
-    capture_output_seconds: float = 0.0,
     max_output_bytes: int = CHUNK_SIZE,
 ) -> BootloadResult:
-    return bootload_stream(
+    return await bootload_stream(
         stream=stream,
-        payload=Path(path).read_bytes(),
-        timeout=timeout,
+        payload=await anyio.Path(path).read_bytes(),
         arm_base=arm_base,
-        capture_output_seconds=capture_output_seconds,
         max_output_bytes=max_output_bytes,
     )
 
 
-def _capture_output(stream: BootloaderStream, seconds: float, max_bytes: int) -> bytes:
-    if seconds <= 0 or max_bytes <= 0:
+async def _wait_for_get_prog_info(wire: _BootloaderWire) -> None:
+    target = struct.pack("<I", GET_PROG_INFO)
+    window = bytearray()
+
+    while True:
+        byte = await wire.get_u8()
+        window.append(byte)
+        if len(window) > len(target):
+            del window[0]
+        if bytes(window) == target:
+            return
+
+
+async def _send_program_info(wire: _BootloaderWire, arm_base: int, code_size: int, code_crc: int) -> None:
+    await wire.put_u32(PUT_PROG_INFO)
+    await wire.put_u32(arm_base)
+    await wire.put_u32(code_size)
+    await wire.put_u32(code_crc)
+
+
+async def _wait_for_code_request(wire: _BootloaderWire, on_print: PrintCallback | None) -> int:
+    while True:
+        op = await wire.get_op(on_print)
+        if op == BOOT_ERROR:
+            raise BootloaderError("pi rejected program info")
+        if op != GET_PROG_INFO:
+            return op
+
+
+async def _capture_output(stream: BootloaderStream, max_bytes: int) -> bytes:
+    if max_bytes <= 0:
         return b""
 
     chunks: list[bytes] = []
     total = 0
-    deadline = time.monotonic() + seconds
     while total < max_bytes:
-        remaining_time = deadline - time.monotonic()
-        if remaining_time <= 0:
-            break
-        chunk = stream.read(max_bytes=min(CHUNK_SIZE, max_bytes - total), timeout=min(0.1, remaining_time))
+        chunk = await stream.read(max_bytes=min(CHUNK_SIZE, max_bytes - total))
         if not chunk:
-            continue
+            break
         chunks.append(chunk)
         total += len(chunk)
     return b"".join(chunks)

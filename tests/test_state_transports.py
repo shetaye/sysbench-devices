@@ -6,6 +6,7 @@ import stat
 import threading
 import time
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,11 @@ from sysbench_devices.models import DeviceRegistration, RuntimeDevice
 from sysbench_devices.registry import RegistryData, RegistryStore
 from sysbench_devices.rpc import SocketRPCClient, SocketRPCServer, dispatch_socket_method
 from sysbench_devices.state import DeviceStateStore
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 class StaticDiscovery(DiscoveryBackend):
@@ -191,7 +197,8 @@ def test_serial_stream_moves_binary_frames(tmp_path):
     assert client.delete(f"/devices/{opened['device_id']}/serial", headers={"X-API-Key": secret}).status_code == 200
 
 
-def test_sdk_serial_stream_uses_live_websocket(tmp_path):
+@pytest.mark.anyio
+async def test_sdk_serial_stream_uses_live_websocket(tmp_path):
     state, secret, _other_secret = make_state(tmp_path)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -207,22 +214,27 @@ def test_sdk_serial_stream_uses_live_websocket(tmp_path):
             time.sleep(0.01)
 
         client = SysbenchDevicesClient(base_url=f"http://127.0.0.1:{port}", api_key=secret)
-        session = client.open_serial("a4c91f2b")
+        session = await client.open_serial("a4c91f2b")
         try:
-            with client.serial_stream(session["device_id"]) as stream:
+            async with client.serial_stream(session["device_id"]) as stream:
                 backend_session = state.serial.sessions[-1]
                 backend_session.input_chunks.append(b"pong")
-                assert stream.read(timeout=1.0) == b"pong"
-                stream.write(b"ping")
+                with anyio.fail_after(1.0):
+                    while True:
+                        chunk = await stream.read()
+                        if chunk:
+                            break
+                assert chunk == b"pong"
+                await stream.write(b"ping")
 
                 for _ in range(20):
                     if backend_session.writes:
                         break
-                    time.sleep(0.01)
+                    await anyio.sleep(0.01)
 
                 assert backend_session.writes == [b"ping"]
         finally:
-            client.close_serial(session["device_id"])
+            await client.close_serial(session["device_id"])
     finally:
         server.should_exit = True
         thread.join(timeout=2)

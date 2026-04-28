@@ -31,66 +31,62 @@ class MCPService:
         self.client = client
         self._serial_streams: dict[str, _MCPSerialStream] = {}
 
-    def list_devices(self) -> dict[str, Any]:
-        return self.client.devices()
+    async def list_devices(self) -> dict[str, Any]:
+        return await self.client.devices()
 
-    def list_reservations(self) -> list[dict[str, Any]]:
-        return self.client.reservations()
+    async def list_reservations(self) -> list[dict[str, Any]]:
+        return await self.client.reservations()
 
-    def reserve(self, device_id: str | None = None, tags: list[str] | None = None) -> dict[str, Any]:
-        return self.client.reserve(device_id=device_id, tags=tags or [])
+    async def reserve(self, device_id: str | None = None, tags: list[str] | None = None) -> dict[str, Any]:
+        return await self.client.reserve(device_id=device_id, tags=tags or [])
 
-    def release(self, reservation_id: str) -> dict[str, str]:
-        self.client.release(reservation_id)
+    async def release(self, reservation_id: str) -> dict[str, str]:
+        await self.client.release(reservation_id)
         return {"reservation_id": reservation_id}
 
-    def power(self, device_id: str, action: str) -> dict[str, Any]:
-        return self.client.power(device_id, action)
+    async def power(self, device_id: str, action: str) -> dict[str, Any]:
+        return await self.client.power(device_id, action)
 
-    def open_serial(self, device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
-        session = self.client.open_serial(device_id, baud_rate=baud_rate)
+    async def open_serial(self, device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
+        session = await self.client.open_serial(device_id, baud_rate=baud_rate)
         try:
             context = self.client.serial_stream(device_id)
-            stream = context.__enter__()
+            stream = await context.__aenter__()
         except BaseException:
-            self.client.close_serial(device_id)
+            await self.client.close_serial(device_id)
             raise
         self._serial_streams[device_id] = _MCPSerialStream(context=context, stream=stream)
         return session
 
-    def read_serial(self, device_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
-        data = self._serial_stream(device_id).read(max_bytes=max_bytes, timeout=timeout)
+    async def read_serial(self, device_id: str, max_bytes: int = 4096) -> dict[str, str]:
+        data = await self._serial_stream(device_id).read(max_bytes=max_bytes)
         return encode_bytes(data)
 
-    def write_serial(self, device_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
+    async def write_serial(self, device_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
         payload = decode_bytes(data, encoding)
-        self._serial_stream(device_id).write(payload)
+        await self._serial_stream(device_id).write(payload)
         return {"bytes_written": len(payload)}
 
-    def close_serial(self, device_id: str) -> dict[str, str]:
+    async def close_serial(self, device_id: str) -> dict[str, str]:
         entry = self._serial_streams.pop(device_id, None)
         try:
             if entry is not None:
-                entry.context.__exit__(None, None, None)
+                await entry.context.__aexit__(None, None, None)
         finally:
-            self.client.close_serial(device_id)
+            await self.client.close_serial(device_id)
         return {"device_id": device_id}
 
-    def bootload_file(
+    async def bootload_file(
         self,
         device_id: str,
         binary_path: str,
-        timeout: float = 10.0,
         arm_base: int = ARM_BASE,
-        capture_output_seconds: float = 0.0,
         max_output_bytes: int = 4096,
     ) -> dict[str, Any]:
-        return self.client.bootload_file(
+        return await self.client.bootload_file(
             stream=self._serial_stream(device_id),
             path=binary_path,
-            timeout=timeout,
             arm_base=arm_base,
-            capture_output_seconds=capture_output_seconds,
             max_output_bytes=max_output_bytes,
         )
 
@@ -108,66 +104,62 @@ def build_mcp_server(service: MCPService) -> FastMCP:
     )
 
     @mcp.tool()
-    def list_devices() -> dict[str, Any]:
+    async def list_devices() -> dict[str, Any]:
         """List registered and discovered sysbench devices."""
-        return service.list_devices()
+        return await service.list_devices()
 
     @mcp.tool()
-    def list_reservations() -> list[dict[str, Any]]:
+    async def list_reservations() -> list[dict[str, Any]]:
         """List active device reservations."""
-        return service.list_reservations()
+        return await service.list_reservations()
 
     @mcp.tool()
-    def reserve(device_id: str | None = None, tags: list[str] | None = None) -> dict[str, Any]:
+    async def reserve(device_id: str | None = None, tags: list[str] | None = None) -> dict[str, Any]:
         """Reserve a device by ID or by tags."""
-        return service.reserve(device_id=device_id, tags=tags)
+        return await service.reserve(device_id=device_id, tags=tags)
 
     @mcp.tool()
-    def release(reservation_id: str) -> dict[str, str]:
+    async def release(reservation_id: str) -> dict[str, str]:
         """Release a reservation."""
-        return service.release(reservation_id)
+        return await service.release(reservation_id)
 
     @mcp.tool()
-    def power(device_id: str, action: str) -> dict[str, Any]:
+    async def power(device_id: str, action: str) -> dict[str, Any]:
         """Run a power action: on, off, or cycle."""
-        return service.power(device_id, action)
+        return await service.power(device_id, action)
 
     @mcp.tool()
-    def open_serial(device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
+    async def open_serial(device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
         """Open a serial session."""
-        return service.open_serial(device_id, baud_rate=baud_rate)
+        return await service.open_serial(device_id, baud_rate=baud_rate)
 
     @mcp.tool()
-    def read_serial(device_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
+    async def read_serial(device_id: str, max_bytes: int = 4096) -> dict[str, str]:
         """Read bytes from a serial session."""
-        return service.read_serial(device_id, max_bytes=max_bytes, timeout=timeout)
+        return await service.read_serial(device_id, max_bytes=max_bytes)
 
     @mcp.tool()
-    def write_serial(device_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
+    async def write_serial(device_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
         """Write bytes to a serial session."""
-        return service.write_serial(device_id, data, encoding=encoding)
+        return await service.write_serial(device_id, data, encoding=encoding)
 
     @mcp.tool()
-    def close_serial(device_id: str) -> dict[str, str]:
+    async def close_serial(device_id: str) -> dict[str, str]:
         """Close a serial session."""
-        return service.close_serial(device_id)
+        return await service.close_serial(device_id)
 
     @mcp.tool()
-    def bootload_file(
+    async def bootload_file(
         device_id: str,
         binary_path: str,
-        timeout: float = 10.0,
         arm_base: int = ARM_BASE,
-        capture_output_seconds: float = 0.0,
         max_output_bytes: int = 4096,
     ) -> dict[str, Any]:
         """Upload a CS140E bootloader binary file over an open serial session."""
-        return service.bootload_file(
+        return await service.bootload_file(
             device_id=device_id,
             binary_path=binary_path,
-            timeout=timeout,
             arm_base=arm_base,
-            capture_output_seconds=capture_output_seconds,
             max_output_bytes=max_output_bytes,
         )
 

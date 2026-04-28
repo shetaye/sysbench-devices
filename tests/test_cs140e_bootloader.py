@@ -5,6 +5,7 @@ from binascii import crc32
 from collections import deque
 from typing import Callable
 
+import anyio
 import pytest
 
 from sysbench_devices.protocols.cs140e_bootloader import (
@@ -20,6 +21,11 @@ from sysbench_devices.protocols.cs140e_bootloader import (
     bootload,
     bootload_stream,
 )
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 class MockStream:
@@ -38,7 +44,7 @@ class MockStream:
         self.enqueue_u32(PRINT_STRING)
         self.enqueue(value.encode() + b"\0")
 
-    def read(self, max_bytes: int = 4096, timeout: float = 0.1) -> bytes:
+    async def read(self, max_bytes: int = 4096) -> bytes:
         if not self._recv_queue:
             return b""
         chunk = self._recv_queue.popleft()
@@ -47,7 +53,7 @@ class MockStream:
             return chunk[:max_bytes]
         return chunk
 
-    def write(self, data: bytes) -> None:
+    async def write(self, data: bytes) -> None:
         self._sent.extend(data)
 
     @property
@@ -67,11 +73,12 @@ def _standard_pi(code: bytes) -> Callable[[MockStream], None]:
     return handler
 
 
-def test_bootloader_success() -> None:
+@pytest.mark.anyio
+async def test_bootloader_success() -> None:
     code = b"test binary payload"
     mock = MockStream(_standard_pi(code))
 
-    result = bootload(mock, code, timeout=1.0)
+    result = await bootload(mock, code)
 
     expected = bytearray()
     expected.extend(struct.pack("<I", PUT_PROG_INFO))
@@ -86,7 +93,8 @@ def test_bootloader_success() -> None:
     assert result.device_id is None
 
 
-def test_bootloader_with_prints() -> None:
+@pytest.mark.anyio
+async def test_bootloader_with_prints() -> None:
     code = b"another binary"
     code_crc = crc32(code) & 0xFFFFFFFF
 
@@ -100,13 +108,14 @@ def test_bootloader_with_prints() -> None:
 
     mock = MockStream(handler)
     prints: list[str] = []
-    result = bootload(mock, code, timeout=1.0, on_print=prints.append)
+    result = await bootload(mock, code, on_print=prints.append)
 
     assert prints == ["checking info", "code ok"]
     assert result.prints == ("checking info", "code ok")
 
 
-def test_bootloader_boot_error() -> None:
+@pytest.mark.anyio
+async def test_bootloader_boot_error() -> None:
     code = b"some code"
 
     def handler(mock: MockStream) -> None:
@@ -114,10 +123,11 @@ def test_bootloader_boot_error() -> None:
         mock.enqueue_u32(BOOT_ERROR)
 
     with pytest.raises(BootloaderError, match="rejected"):
-        bootload(MockStream(handler), code, timeout=1.0)
+        await bootload(MockStream(handler), code)
 
 
-def test_bootloader_crc_mismatch() -> None:
+@pytest.mark.anyio
+async def test_bootloader_crc_mismatch() -> None:
     code = b"some code"
     wrong_crc = ((crc32(code) & 0xFFFFFFFF) + 1) & 0xFFFFFFFF
 
@@ -127,10 +137,11 @@ def test_bootloader_crc_mismatch() -> None:
         mock.enqueue_u32(wrong_crc)
 
     with pytest.raises(BootloaderError, match="CRC mismatch"):
-        bootload(MockStream(handler), code, timeout=1.0)
+        await bootload(MockStream(handler), code)
 
 
-def test_bootloader_garbage_before_get_prog_info() -> None:
+@pytest.mark.anyio
+async def test_bootloader_garbage_before_get_prog_info() -> None:
     code = b"test"
     code_crc = crc32(code) & 0xFFFFFFFF
 
@@ -141,12 +152,13 @@ def test_bootloader_garbage_before_get_prog_info() -> None:
         mock.enqueue_u32(code_crc)
         mock.enqueue_u32(BOOT_SUCCESS)
 
-    result = bootload(MockStream(handler), code, timeout=1.0)
+    result = await bootload(MockStream(handler), code)
 
     assert result.bytes_sent == len(code)
 
 
-def test_bootloader_drains_extra_get_prog_info() -> None:
+@pytest.mark.anyio
+async def test_bootloader_drains_extra_get_prog_info() -> None:
     code = b"test"
     code_crc = crc32(code) & 0xFFFFFFFF
 
@@ -158,18 +170,28 @@ def test_bootloader_drains_extra_get_prog_info() -> None:
         mock.enqueue_u32(code_crc)
         mock.enqueue_u32(BOOT_SUCCESS)
 
-    result = bootload(MockStream(handler), code, timeout=1.0)
+    result = await bootload(MockStream(handler), code)
 
     assert result.bytes_sent == len(code)
 
 
-def test_bootload_stream_uses_open_stream() -> None:
+@pytest.mark.anyio
+async def test_bootload_stream_uses_open_stream() -> None:
     code = b"program"
     stream = MockStream(_standard_pi(code))
     stream.device_id = "board-1"
 
-    result = bootload_stream(stream, code, timeout=1.0)
+    result = await bootload_stream(stream, code)
 
     assert result.device_id == "board-1"
     assert result.bytes_sent == len(code)
     assert stream.sent_bytes.endswith(struct.pack("<I", PUT_CODE) + code)
+
+
+@pytest.mark.anyio
+async def test_bootloader_uses_caller_deadline() -> None:
+    stream = MockStream(lambda _mock: None)
+
+    with pytest.raises(TimeoutError):
+        with anyio.fail_after(0.01):
+            await bootload(stream, b"program")

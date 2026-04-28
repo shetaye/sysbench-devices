@@ -1,8 +1,15 @@
 from collections import deque
 from pathlib import Path
 
+import pytest
+
 from sysbench_devices.mcp import MCPService, build_mcp_server
 from sysbench_devices.protocols.cs140e_bootloader import ARM_BASE
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 class FakeStream:
@@ -10,11 +17,11 @@ class FakeStream:
         self.reads = deque([b"hello"])
         self.writes = []
 
-    def read(self, max_bytes=4096, timeout=0.1):
+    async def read(self, max_bytes=4096):
         chunk = self.reads.popleft() if self.reads else b""
         return chunk[:max_bytes]
 
-    def write(self, data):
+    async def write(self, data):
         self.writes.append(data)
 
 
@@ -23,11 +30,11 @@ class FakeStreamContext:
         self.client = client
         self.device_id = device_id
 
-    def __enter__(self):
+    async def __aenter__(self):
         self.client.calls.append(("stream_enter", self.device_id))
         return self.client.streams[self.device_id]
 
-    def __exit__(self, exc_type, exc, traceback):
+    async def __aexit__(self, exc_type, exc, traceback):
         self.client.calls.append(("stream_exit", self.device_id))
 
 
@@ -36,26 +43,26 @@ class FakeClient:
         self.calls = []
         self.streams = {}
 
-    def devices(self):
+    async def devices(self):
         self.calls.append(("devices",))
         return {"devices": [], "discovered": []}
 
-    def reservations(self):
+    async def reservations(self):
         self.calls.append(("reservations",))
         return []
 
-    def reserve(self, device_id=None, tags=None):
+    async def reserve(self, device_id=None, tags=None):
         self.calls.append(("reserve", device_id, tags))
         return {"id": "resv", "device_id": device_id, "attribution": {"kind": "api_key", "id": "test"}}
 
-    def release(self, reservation_id):
+    async def release(self, reservation_id):
         self.calls.append(("release", reservation_id))
 
-    def power(self, device_id, action):
+    async def power(self, device_id, action):
         self.calls.append(("power", device_id, action))
         return {"device_id": device_id, "action": action}
 
-    def open_serial(self, device_id, baud_rate=115200):
+    async def open_serial(self, device_id, baud_rate=115200):
         self.calls.append(("open_serial", device_id, baud_rate))
         self.streams[device_id] = FakeStream()
         return {"device_id": device_id, "baud_rate": baud_rate}
@@ -64,16 +71,14 @@ class FakeClient:
         self.calls.append(("serial_stream", device_id))
         return FakeStreamContext(self, device_id)
 
-    def close_serial(self, device_id):
+    async def close_serial(self, device_id):
         self.calls.append(("close_serial", device_id))
 
-    def bootload_file(
+    async def bootload_file(
         self,
         stream,
         path,
-        timeout=10.0,
         arm_base=ARM_BASE,
-        capture_output_seconds=0.0,
         max_output_bytes=4096,
     ):
         self.calls.append(
@@ -81,9 +86,7 @@ class FakeClient:
                 "bootload_file",
                 stream,
                 path,
-                timeout,
                 arm_base,
-                capture_output_seconds,
                 max_output_bytes,
             )
         )
@@ -97,18 +100,19 @@ class FakeClient:
         }
 
 
-def test_mcp_service_uses_http_sdk_surface():
+@pytest.mark.anyio
+async def test_mcp_service_uses_http_sdk_surface():
     client = FakeClient()
     service = MCPService(client)
 
-    assert service.list_devices() == {"devices": [], "discovered": []}
-    assert service.reserve(tags=["fpga"])["id"] == "resv"
-    assert service.release("resv") == {"reservation_id": "resv"}
-    session = service.open_serial("board", baud_rate=230400)
-    assert service.read_serial(session["device_id"]) == {"encoding": "base64", "data": "aGVsbG8="}
-    assert service.write_serial(session["device_id"], "70696e67", encoding="hex") == {"bytes_written": 4}
+    assert await service.list_devices() == {"devices": [], "discovered": []}
+    assert (await service.reserve(tags=["fpga"]))["id"] == "resv"
+    assert await service.release("resv") == {"reservation_id": "resv"}
+    session = await service.open_serial("board", baud_rate=230400)
+    assert await service.read_serial(session["device_id"]) == {"encoding": "base64", "data": "aGVsbG8="}
+    assert await service.write_serial(session["device_id"], "70696e67", encoding="hex") == {"bytes_written": 4}
     assert client.streams["board"].writes == [b"ping"]
-    assert service.close_serial("board") == {"device_id": "board"}
+    assert await service.close_serial("board") == {"device_id": "board"}
 
     assert ("devices",) in client.calls
     assert ("reserve", None, ["fpga"]) in client.calls
@@ -119,18 +123,17 @@ def test_mcp_service_uses_http_sdk_surface():
     assert ("close_serial", "board") in client.calls
 
 
-def test_mcp_service_exposes_bootloader_for_open_serial_stream(tmp_path) -> None:
+@pytest.mark.anyio
+async def test_mcp_service_exposes_bootloader_for_open_serial_stream(tmp_path) -> None:
     client = FakeClient()
     service = MCPService(client)
     binary_path = tmp_path / "kernel.bin"
     binary_path.write_bytes(b"kernel image")
-    session = service.open_serial("board")
+    session = await service.open_serial("board")
 
-    result = service.bootload_file(
+    result = await service.bootload_file(
         device_id=session["device_id"],
         binary_path=str(binary_path),
-        timeout=3.0,
-        capture_output_seconds=0.25,
         max_output_bytes=128,
     )
 
@@ -139,9 +142,7 @@ def test_mcp_service_exposes_bootloader_for_open_serial_stream(tmp_path) -> None
         "bootload_file",
         client.streams["board"],
         str(binary_path),
-        3.0,
         ARM_BASE,
-        0.25,
         128,
     )
 

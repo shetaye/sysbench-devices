@@ -155,6 +155,8 @@ class SocketRPCClient:
                 reader.join(timeout=1)
 
     def _connect(self) -> socket.socket:
+        if not Path(self.socket_path).exists():
+            raise SocketRPCConnectionError(f"socket not found: {self.socket_path}")
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             client.connect(self.socket_path)

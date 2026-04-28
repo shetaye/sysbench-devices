@@ -314,8 +314,8 @@ Tests:
 
 `client.py`
 
-- Python SDK over the daemon HTTP/WebSocket API.
-- Thin methods matching the public operational surface.
+- Async Python SDK over the daemon HTTP/WebSocket API.
+- Thin `anyio`-cancellable methods matching the public operational surface.
 - No Unix socket transport and no management RPC calls.
 - Accept an API key for reservation attribution and reservation-scoped
   operations.
@@ -595,8 +595,8 @@ Completed baseline:
   - Added tests for logging configuration and MCP service/server construction.
   - Verified with `uv run pytest`.
 - Phase 5 CS140E bootloader work completed so far:
-  - Ported the old CS140E bootloader sync, framing, CRC echo, `PRINT_STRING`,
-    `BOOT_ERROR`, and `BOOT_SUCCESS` handling into
+  - Ported the CS140E bootloader framing, CRC echo, `PRINT_STRING`,
+    `BOOT_ERROR`, and `BOOT_SUCCESS` handling into async `anyio` code in
     `protocols/cs140e_bootloader.py`.
   - Added a WebSocket serial stream adapter that reads and writes binary frames
     for open serial sessions.
@@ -691,8 +691,8 @@ Phase 4 implements real logging and real MCP.
 
 Phase 5 implements the CS140E bootloader in the SDK and MCP.
 
-1. Done: port the old CS140E bootloader framing, sync, CRC, status handling,
-   and error handling into `protocols/cs140e_bootloader.py`.
+1. Done: port the CS140E bootloader framing, CRC, status handling, and error
+   handling into async `anyio` code in `protocols/cs140e_bootloader.py`.
 2. Done: add SDK methods that expose the bootloader over WebSocket serial
    streams.
 3. Done: add an MCP bootloader upload tool backed by the SDK. This uses the

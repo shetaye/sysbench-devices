@@ -1,4 +1,4 @@
-"""CS140E bootloader protocol over the public HTTP serial API."""
+"""CS140E bootloader protocol over the public serial stream API."""
 
 from __future__ import annotations
 
@@ -7,12 +7,9 @@ import struct
 import time
 from binascii import crc32
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from sysbench_devices.errors import SysbenchDevicesError
-
-if TYPE_CHECKING:
-    from sysbench_devices.client import SysbenchDevicesClient
 
 
 GET_PROG_INFO = 0x11112222
@@ -46,6 +43,10 @@ class BootloaderStream(Protocol):
     def write(self, data: bytes) -> None: ...
 
 
+class SerialStreamClient(Protocol):
+    def serial_stream(self, device_id: str, baud_rate: int = 115200, connect_timeout: float = 10.0) -> Any: ...
+
+
 @dataclass(frozen=True)
 class BootloadResult:
     session_id: str | None
@@ -67,22 +68,6 @@ class BootloadResult:
                 "data": base64.b64encode(self.captured_output).decode("ascii"),
             },
         }
-
-
-class HttpSerialBootloaderStream:
-    """Bootloader byte stream backed by SDK HTTP serial sessions."""
-
-    def __init__(self, client: SysbenchDevicesClient, session_id: str) -> None:
-        self.client = client
-        self.session_id = session_id
-
-    def read(self, max_bytes: int = CHUNK_SIZE, timeout: float = 0.1) -> bytes:
-        response = self.client.read_serial(self.session_id, max_bytes=max_bytes, timeout=timeout)
-        return decode_serial_response(response)
-
-    def write(self, data: bytes) -> None:
-        encoded = base64.b64encode(data).decode("ascii")
-        self.client.write_serial(self.session_id, encoded, encoding="base64")
 
 
 class _BootloaderWire:
@@ -138,18 +123,6 @@ class _BootloaderWire:
             self._stream.write(data)
         except Exception as exc:
             raise BootloaderError(f"bootloader write failed: {exc}") from exc
-
-
-def decode_serial_response(response: dict[str, str]) -> bytes:
-    encoding = response.get("encoding", "utf-8")
-    data = response.get("data", "")
-    if encoding == "base64":
-        return base64.b64decode(data.encode("ascii"))
-    if encoding == "hex":
-        return bytes.fromhex(data)
-    if encoding == "utf-8":
-        return data.encode("utf-8")
-    raise BootloaderError(f"unsupported serial encoding: {encoding}")
 
 
 def bootload(
@@ -223,7 +196,7 @@ def bootload(
 
 
 def bootload_via_sdk(
-    client: SysbenchDevicesClient,
+    client: SerialStreamClient,
     device_id: str,
     payload: bytes,
     baud_rate: int = 115200,
@@ -232,26 +205,21 @@ def bootload_via_sdk(
     capture_output_seconds: float = 0.0,
     max_output_bytes: int = CHUNK_SIZE,
 ) -> BootloadResult:
-    session = client.open_serial(device_id, baud_rate=baud_rate)
-    session_id = str(session["id"])
-    stream = HttpSerialBootloaderStream(client, session_id)
-    try:
+    with client.serial_stream(device_id, baud_rate=baud_rate, connect_timeout=timeout) as stream:
         result = bootload(stream, payload, timeout=timeout, arm_base=arm_base)
         captured_output = _capture_output(stream, capture_output_seconds, max_output_bytes)
         return BootloadResult(
-            session_id=session_id,
+            session_id=getattr(stream, "session_id", None),
             bytes_sent=result.bytes_sent,
             crc32=result.crc32,
             arm_base=result.arm_base,
             prints=result.prints,
             captured_output=captured_output,
         )
-    finally:
-        client.close_serial(session_id)
 
 
 def upload_binary(
-    client: SysbenchDevicesClient,
+    client: SerialStreamClient,
     device_id: str,
     payload: bytes,
     baud_rate: int = 115200,

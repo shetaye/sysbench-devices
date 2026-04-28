@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import struct
 from binascii import crc32
 from collections import deque
@@ -178,34 +177,34 @@ class FakeSDKClient:
         self.sent = bytearray()
         self.calls: list[tuple] = []
 
-    def open_serial(self, device_id: str, baud_rate: int = 115200) -> dict[str, object]:
-        self.calls.append(("open_serial", device_id, baud_rate))
-        return {"id": "session-1"}
+    def serial_stream(self, device_id: str, baud_rate: int = 115200, connect_timeout: float = 10.0) -> "FakeSDKClient":
+        self.calls.append(("serial_stream", device_id, baud_rate, connect_timeout))
+        return self
 
-    def read_serial(self, session_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
-        self.calls.append(("read_serial", session_id, max_bytes, timeout))
-        chunk = self.reads.popleft() if self.reads else b""
-        return {"encoding": "base64", "data": base64.b64encode(chunk).decode("ascii")}
+    def __enter__(self) -> "FakeSDKClient":
+        self.calls.append(("stream_enter",))
+        return self
 
-    def write_serial(self, session_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
-        self.calls.append(("write_serial", session_id, data, encoding))
-        assert encoding == "base64"
-        raw = base64.b64decode(data.encode("ascii"))
-        self.sent.extend(raw)
-        return {"bytes_written": len(raw)}
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.calls.append(("stream_exit",))
 
-    def close_serial(self, session_id: str) -> None:
-        self.calls.append(("close_serial", session_id))
+    def read(self, max_bytes: int = 4096, timeout: float = 0.1) -> bytes:
+        self.calls.append(("read", max_bytes, timeout))
+        return self.reads.popleft() if self.reads else b""
+
+    def write(self, data: bytes) -> None:
+        self.calls.append(("write", data))
+        self.sent.extend(data)
 
 
-def test_bootload_via_sdk_uses_http_serial_session() -> None:
+def test_bootload_via_sdk_uses_websocket_serial_stream() -> None:
     code = b"program"
     client = FakeSDKClient(code)
 
     result = bootload_via_sdk(client, "board-1", code, baud_rate=230400, timeout=1.0)
 
-    assert result.session_id == "session-1"
+    assert result.session_id is None
     assert result.bytes_sent == len(code)
-    assert client.calls[0] == ("open_serial", "board-1", 230400)
-    assert client.calls[-1] == ("close_serial", "session-1")
+    assert client.calls[0] == ("serial_stream", "board-1", 230400, 1.0)
+    assert client.calls[-1] == ("stream_exit",)
     assert client.sent.endswith(struct.pack("<I", PUT_CODE) + code)

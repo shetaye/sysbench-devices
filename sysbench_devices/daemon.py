@@ -5,13 +5,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import signal
 import threading
 from pathlib import Path
 
 from sysbench_devices.discovery import HostDiscoveryBackend
 from sysbench_devices.doctor import run_doctor
-from sysbench_devices.http import SysbenchHTTPServer
+from sysbench_devices.http import build_http_server
 from sysbench_devices.logging_config import configure_logging
 from sysbench_devices.power import UhubctlPowerBackend
 from sysbench_devices.registry import RegistryStore
@@ -60,32 +59,20 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.log_level)
     logger.info("starting sbdevd registry=%s socket=%s http=%s:%s", args.registry, args.socket, args.http_host, args.http_port)
     state = build_state(args.registry)
-    stop = threading.Event()
 
     def doctor() -> object:
         return run_doctor(args.registry, args.socket)
 
     socket_server = SocketRPCServer(args.socket, state, doctor=doctor)
-    http_server = SysbenchHTTPServer((args.http_host, args.http_port), state)
-
-    def request_stop(signum: int, frame: object) -> None:
-        logger.info("received signal %s; shutting down", signum)
-        stop.set()
-        socket_server.shutdown()
-        http_server.shutdown()
-
-    signal.signal(signal.SIGTERM, request_stop)
-    signal.signal(signal.SIGINT, request_stop)
+    http_server = build_http_server(state, args.http_host, args.http_port)
 
     socket_thread = threading.Thread(target=socket_server.serve_forever, name="sbdevd-rpc", daemon=True)
     socket_thread.start()
     try:
         logger.info("sbdevd ready")
-        http_server.serve_forever()
+        http_server.run()
     finally:
-        stop.set()
         logger.info("stopping sbdevd")
-        http_server.server_close()
         socket_server.shutdown()
         socket_server.server_close()
         socket_thread.join(timeout=2)

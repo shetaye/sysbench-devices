@@ -1,8 +1,8 @@
 # Sysbench Device Manager
 
 Manage UART-attached sysbench devices through a local daemon, a control CLI, an
-HTTP SDK, and an MCP server. Use USB hub power control, serial sessions, device
-registration, and attributed reservations from one host process.
+HTTP/WebSocket SDK, and an MCP server. Use USB hub power control, serial
+sessions, device registration, and attributed reservations from one host process.
 
 ## tl;dr
 
@@ -33,7 +33,7 @@ uv run sbdevctl api-keys create --id local --label "Local tools"
 export SBDEVD_API_KEY=PASTE_SECRET_HERE
 ```
 
-Use HTTP-backed clients:
+Use SDK/MCP clients:
 
 ```sh
 SBDEVD_API_KEY=$SBDEVD_API_KEY uv run sbdevmcp --base-url http://127.0.0.1:8765
@@ -49,8 +49,10 @@ Use these client paths:
 - Use `sbdevctl` for all management through the Unix socket.
 - Use HTTP for automation: devices, reservations, power, serial sessions, and
   serial run.
-- Use the Python SDK and MCP server over HTTP only.
-- Use API keys for HTTP reservation attribution.
+- Use WebSocket binary streams for bidirectional byte-oriented serial workflows
+  such as bootloading.
+- Use the Python SDK and MCP server over the daemon HTTP/WebSocket API.
+- Use API keys for HTTP/WebSocket reservation attribution.
 - Expect Unix socket reservations to use the built-in `socket:admin`
   attribution.
 
@@ -230,7 +232,7 @@ API.
 }
 ```
 
-Use MCP tools for HTTP-backed operations only:
+Use MCP tools for daemon-backed operations:
 
 - `list_devices`
 - `list_reservations`
@@ -245,8 +247,8 @@ Use MCP tools for HTTP-backed operations only:
 - `bootload_binary`
 
 Send `bootload_binary` payloads as `base64`, `hex`, or `utf-8`. The tool opens
-an HTTP serial session, runs the CS140E bootloader protocol, and closes the
-session.
+a WebSocket serial stream, runs the CS140E bootloader protocol over binary
+frames, and closes the stream.
 
 ## Troubleshooting
 

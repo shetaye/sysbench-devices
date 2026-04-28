@@ -14,13 +14,14 @@ hub port.
 - Control tool named `sbdevctl`.
 - MCP tool named `sbdevmcp`.
 - All entrypoints installable as `uv` tools.
-- Python SDK over the HTTP API only.
-- HTTP API for operational use: device listing, reservations, power control, and
-  serial sessions.
+- Python SDK over the daemon HTTP/WebSocket API.
+- HTTP API for operational use: device listing, reservations, power control,
+  serial sessions, and one-shot serial commands.
+- WebSocket API for bidirectional byte-oriented serial streams.
 - Unix socket transport as an `sbdevctl`-only superset control surface: all
-  management operations plus the HTTP operational capabilities.
-- API keys for HTTP reservation attribution; Unix socket reservations use a
-  special `admin` attribution ID.
+  management operations plus the JSON operational capabilities.
+- API keys for HTTP/WebSocket reservation attribution; Unix socket reservations
+  use a special `admin` attribution ID.
 - No users, passwords, login sessions, role model, or web UI.
 - Explicit device registration.
 - TOML registry storage.
@@ -34,9 +35,9 @@ hub port.
 ## Non-Goals
 
 - No browser UI or WebSocket UI.
-- No full user model or permission model. API keys identify HTTP reservation
-  owners, and Unix socket reservations use the special `admin` attribution ID;
-  neither is a general account system.
+- No full user model or permission model. API keys identify HTTP/WebSocket
+  reservation owners, and Unix socket reservations use the special `admin`
+  attribution ID; neither is a general account system.
 - No direct public Unix socket clients other than `sbdevctl`.
 - No compatibility with the old HTTP endpoint shapes, old CLI arguments, or old
   SDK surface.
@@ -59,15 +60,14 @@ Carry forward:
 - UART open/read/write/close sessions.
 - UART baud-rate configuration.
 - One-shot serial command helper.
-- Binary-safe payload encodings for HTTP SDK/MCP workflows and `sbdevctl`
-  socket workflows.
+- Binary-safe payload encodings for JSON serial workflows and native binary
+  frames for WebSocket serial streams.
 - CS140E/RPi bootloader protocol helper as an optional protocol module.
 
 Delete or replace:
 
 - Rust workspace.
 - SQLite database.
-- WebSocket transport.
 - Web UI.
 - Users, passwords, browser sessions, and bearer-token login flows.
 - Admin/setup web behavior.
@@ -264,6 +264,7 @@ Tests:
 - HTTP API for the operational surface exposed to automation and tools.
 - Provide endpoints for device listing, reservation create/release/list, power
   actions, serial session open/read/write/close, and one-shot serial command.
+- Provide a WebSocket endpoint for bidirectional serial byte streams.
 - Require an API key for reservation creation so reservations can be attributed
   to a stable caller. Use the same attribution for reservation-scoped power and
   serial operations.
@@ -286,6 +287,7 @@ GET    /serial/sessions/{session-id}/read
 POST   /serial/sessions/{session-id}/write
 DELETE /serial/sessions/{session-id}
 POST   /serial/run
+WS     /serial/streams/{device-id}?baud_rate=115200
 ```
 
 Tests:
@@ -316,8 +318,8 @@ Tests:
 
 `client.py`
 
-- Python SDK over the HTTP API only.
-- Thin methods matching the public HTTP operational surface.
+- Python SDK over the daemon HTTP/WebSocket API.
+- Thin methods matching the public operational surface.
 - No Unix socket transport and no management RPC calls.
 - Accept an API key for reservation attribution and reservation-scoped
   operations.
@@ -420,7 +422,7 @@ Tests:
 `mcp.py`
 
 - `sbdevmcp` stdio MCP server.
-- Built on the Python SDK and therefore limited to the HTTP operational API.
+- Built on the Python SDK and therefore limited to the daemon operational API.
 - No direct hardware logic.
 - No Unix socket or management RPC access.
 - Keep serial session lifecycle management in the MCP service layer.
@@ -435,7 +437,7 @@ Tests:
 `protocols/cs140e_bootloader.py`
 
 - Protocol-specific bootloader helper carried forward from the old Python SDK
-  and exposed through SDK/MCP helpers that use the HTTP serial API primitives.
+  and exposed through SDK/MCP helpers that use WebSocket serial streams.
 - Do not add daemon-native bootloader state or a dedicated bootloader HTTP
   endpoint unless the operational HTTP surface is intentionally expanded later.
 - Publicly named as CS140E/RPi-specific, not a core daemon concept.
@@ -592,7 +594,7 @@ Completed baseline:
     handling.
   - Replaced the placeholder MCP JSON loop with a real FastMCP server from the
     official `modelcontextprotocol/python-sdk` package.
-  - Kept MCP on the HTTP SDK side of the boundary; it still exposes only HTTP
+  - Kept MCP on the SDK side of the boundary; it still exposes only daemon
     operational capabilities and no Unix socket management operations.
   - Added `mcp>=1.0.0` as a runtime dependency.
   - Added tests for logging configuration and MCP service/server construction.
@@ -601,11 +603,10 @@ Completed baseline:
   - Ported the old CS140E bootloader sync, framing, CRC echo, `PRINT_STRING`,
     `BOOT_ERROR`, and `BOOT_SUCCESS` handling into
     `protocols/cs140e_bootloader.py`.
-  - Added an HTTP-serial stream adapter that opens an SDK serial session, reads
-    and writes binary-safe base64 payloads, and closes the session after upload.
+  - Added a WebSocket serial stream adapter that reads and writes binary frames
+    and closes the stream after upload.
   - Added SDK helpers `bootload` and `bootload_file`.
-  - Added MCP `bootload_binary`, backed by the SDK and therefore still limited
-    to HTTP serial API capabilities.
+  - Added MCP `bootload_binary`, backed by the SDK WebSocket serial stream.
   - Added bootloader protocol tests for success, print-string handling, boot
     errors, CRC mismatch, garbage before sync, extra `GET_PROG_INFO`, and SDK
     session lifecycle.
@@ -686,7 +687,7 @@ Phase 4 implements real logging and real MCP.
    calls/failures.
 4. Done: replace the placeholder MCP stdio JSON loop with FastMCP from the
    official Python MCP SDK.
-5. Done: expose SDK-backed MCP tools for HTTP operational capabilities only:
+5. Done: expose SDK-backed MCP tools for daemon operational capabilities:
    devices, reservations, reserve/release, power, serial open/read/write/close,
    and serial run.
 6. Done: add MCP/logging unit tests.
@@ -697,10 +698,11 @@ Phase 5 implements the CS140E bootloader in the SDK and MCP.
 
 1. Done: port the old CS140E bootloader framing, sync, CRC, status handling,
    and error handling into `protocols/cs140e_bootloader.py`.
-2. Done: add SDK methods that expose the bootloader over the HTTP serial API.
+2. Done: add SDK methods that expose the bootloader over WebSocket serial
+   streams.
 3. Done: add an MCP bootloader upload tool backed by the SDK. This uses the
-   existing HTTP serial session capabilities; it does not add a dedicated
-   bootloader endpoint to the daemon.
+   WebSocket serial stream capability; it does not add a dedicated bootloader
+   endpoint to the daemon.
 4. Done: add fixture-heavy unit tests for success, boot errors, CRC mismatch,
    garbage before sync, print-string handling, extra `GET_PROG_INFO`, and SDK
    session lifecycle.

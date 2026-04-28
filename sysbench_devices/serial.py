@@ -65,6 +65,26 @@ class MemorySerialBackend:
         return session
 
 
+class PySerialSession:
+    def __init__(self, port: object) -> None:
+        self._port = port
+
+    def read(self, max_bytes: int, timeout: float) -> bytes:
+        _validate_max_bytes(max_bytes)
+        previous_timeout = getattr(self._port, "timeout", None)
+        self._port.timeout = timeout
+        try:
+            return bytes(self._port.read(max_bytes))
+        finally:
+            self._port.timeout = previous_timeout
+
+    def write(self, data: bytes) -> int:
+        return int(self._port.write(data))
+
+    def close(self) -> None:
+        self._port.close()
+
+
 class PySerialBackend:
     def open(self, runtime: RuntimeDevice, baud_rate: int) -> SerialPortSession:
         if runtime.serial_port is None:
@@ -73,7 +93,7 @@ class PySerialBackend:
             import serial as pyserial
         except ImportError as exc:
             raise HardwareError("pyserial is not installed") from exc
-        return pyserial.Serial(runtime.serial_port, baudrate=baud_rate, timeout=0)
+        return PySerialSession(pyserial.Serial(runtime.serial_port, baudrate=baud_rate, timeout=0))
 
 
 def read_until_quiet(session: SerialPortSession, max_bytes: int, quiet_time: float, timeout: float) -> bytes:

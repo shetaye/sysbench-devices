@@ -1,4 +1,4 @@
-"""MCP server backed by the public HTTP SDK."""
+"""MCP server backed by the public SDK."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ class MCPService:
 def build_mcp_server(service: MCPService) -> FastMCP:
     mcp = FastMCP(
         "Sysbench Device Manager",
-        instructions="Use the HTTP API through SDK-backed MCP tools. Management-only operations are not exposed.",
+        instructions="Use the daemon API through SDK-backed MCP tools. Management-only operations are not exposed.",
     )
 
     @mcp.tool()
@@ -174,7 +174,7 @@ def build_mcp_server(service: MCPService) -> FastMCP:
         capture_output_seconds: float = 0.0,
         max_output_bytes: int = 4096,
     ) -> dict[str, Any]:
-        """Upload a CS140E bootloader binary over an HTTP serial session."""
+        """Upload a CS140E bootloader binary over a WebSocket serial stream."""
         return service.bootload_binary(
             device_id=device_id,
             data=data,

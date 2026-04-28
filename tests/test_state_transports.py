@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import json
+import socket
 import stat
 import threading
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+import time
 
+import pytest
+from fastapi.testclient import TestClient
+
+from sysbench_devices.errors import ConflictError
 from sysbench_devices.api_keys import create_api_key
 from sysbench_devices.client import SysbenchDevicesClient
 from sysbench_devices.discovery import DiscoveryBackend
-from sysbench_devices.http import SysbenchHTTPServer
+from sysbench_devices.http import build_http_app, build_http_server
 from sysbench_devices.models import DeviceRegistration, RuntimeDevice
 from sysbench_devices.registry import RegistryData, RegistryStore
 from sysbench_devices.rpc import SocketRPCClient, SocketRPCServer, dispatch_socket_method
@@ -71,92 +74,114 @@ def test_socket_rpc_server_smoke(tmp_path):
 
 def test_http_reservation_uses_api_key_attribution(tmp_path):
     state, secret, _other_secret = make_state(tmp_path)
-    server = SysbenchHTTPServer(("127.0.0.1", 0), state)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_port}"
-    try:
-        client = SysbenchDevicesClient(base_url=base_url, api_key=secret)
-        reservation = client.reserve(device_id="a4c91f2b")
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    client = TestClient(build_http_app(state))
 
+    response = client.post("/reservations", json={"device_id": "a4c91f2b"}, headers={"X-API-Key": secret})
+
+    assert response.status_code == 200
+    reservation = response.json()
     assert reservation["attribution"]["kind"] == "api_key"
     assert reservation["attribution"]["id"] == "autograder"
 
 
 def test_http_rejects_reservation_without_api_key(tmp_path):
     state, _secret, _other_secret = make_state(tmp_path)
-    server = SysbenchHTTPServer(("127.0.0.1", 0), state)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        request = Request(
-            f"http://127.0.0.1:{server.server_port}/reservations",
-            data=json.dumps({"device_id": "a4c91f2b"}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            urlopen(request, timeout=10)
-        except HTTPError as exc:
-            assert exc.code == 401
-        else:
-            raise AssertionError("expected HTTP 401")
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    client = TestClient(build_http_app(state))
+
+    response = client.post("/reservations", json={"device_id": "a4c91f2b"})
+
+    assert response.status_code == 401
 
 
 def test_http_rejects_serial_read_without_api_key(tmp_path):
     state, secret, _other_secret = make_state(tmp_path)
-    server = SysbenchHTTPServer(("127.0.0.1", 0), state)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_port}"
-    try:
-        session = SysbenchDevicesClient(base_url=base_url, api_key=secret).open_serial("a4c91f2b")
-        request = Request(
-            f"{base_url}/serial/sessions/{session['id']}/read",
-            method="GET",
-        )
-        try:
-            urlopen(request, timeout=10)
-        except HTTPError as exc:
-            assert exc.code == 401
-        else:
-            raise AssertionError("expected HTTP 401")
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    client = TestClient(build_http_app(state))
+    opened = client.post(
+        "/serial/sessions",
+        json={"device_id": "a4c91f2b"},
+        headers={"X-API-Key": secret},
+    ).json()
+
+    response = client.get(f"/serial/sessions/{opened['id']}/read")
+
+    assert response.status_code == 401
 
 
 def test_http_rejects_release_by_different_api_key(tmp_path):
     state, secret, other_secret = make_state(tmp_path)
-    server = SysbenchHTTPServer(("127.0.0.1", 0), state)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    client = TestClient(build_http_app(state))
+    reservation = client.post(
+        "/reservations",
+        json={"device_id": "a4c91f2b"},
+        headers={"X-API-Key": secret},
+    ).json()
+
+    response = client.delete(f"/reservations/{reservation['id']}", headers={"X-API-Key": other_secret})
+
+    assert response.status_code == 409
+    assert [reservation.id for reservation in state.list_reservations()] == [reservation["id"]]
+
+
+def test_serial_stream_moves_binary_frames(tmp_path):
+    state, secret, _other_secret = make_state(tmp_path)
+    client = TestClient(build_http_app(state))
+
+    with client.websocket_connect("/serial/streams/a4c91f2b?baud_rate=230400", headers={"X-API-Key": secret}) as websocket:
+        backend_session = state.serial.sessions[-1]
+        backend_session.input_chunks.append(b"hello")
+        assert websocket.receive_bytes() == b"hello"
+
+        websocket.send_bytes(b"status")
+        for _ in range(20):
+            if backend_session.writes:
+                break
+            time.sleep(0.01)
+
+        assert backend_session.writes == [b"status"]
+
+
+def test_sdk_serial_stream_uses_live_websocket(tmp_path):
+    state, secret, _other_secret = make_state(tmp_path)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    port = sock.getsockname()[1]
+    server = build_http_server(state, "127.0.0.1", port)
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
     thread.start()
-    base_url = f"http://127.0.0.1:{server.server_port}"
     try:
-        owner = SysbenchDevicesClient(base_url=base_url, api_key=secret)
-        other = SysbenchDevicesClient(base_url=base_url, api_key=other_secret)
-        reservation = owner.reserve(device_id="a4c91f2b")
-        try:
-            other.release(reservation["id"])
-        except RuntimeError as exc:
-            assert "conflict" in str(exc)
-        else:
-            raise AssertionError("expected release by different API key to fail")
+        for _ in range(50):
+            if server.started:
+                break
+            time.sleep(0.01)
+
+        client = SysbenchDevicesClient(base_url=f"http://127.0.0.1:{port}", api_key=secret)
+        with client.serial_stream("a4c91f2b") as stream:
+            backend_session = state.serial.sessions[-1]
+            backend_session.input_chunks.append(b"pong")
+            assert stream.read(timeout=1.0) == b"pong"
+            stream.write(b"ping")
+
+            for _ in range(20):
+                if backend_session.writes:
+                    break
+                time.sleep(0.01)
+
+            assert backend_session.writes == [b"ping"]
     finally:
-        server.shutdown()
-        server.server_close()
+        server.should_exit = True
         thread.join(timeout=2)
 
-    assert [reservation.id for reservation in state.list_reservations()] == [reservation["id"]]
+
+def test_only_one_serial_session_per_device(tmp_path):
+    state, secret, _other_secret = make_state(tmp_path)
+    attr = state.attribution_for_api_key(secret)
+    session = state.open_serial("a4c91f2b", attribution=attr)
+    try:
+        with pytest.raises(ConflictError, match="already has an open serial session"):
+            state.open_serial("a4c91f2b", attribution=attr)
+    finally:
+        state.close_serial(session.id, attribution=attr)
 
 
 def test_socket_admin_can_release_api_key_reservation(tmp_path):

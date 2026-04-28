@@ -5,8 +5,11 @@ description = "Local daemon, CLI, SDK, and MCP service for UART-attached sysbenc
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "fastapi>=0.136.1",
     "mcp>=1.0.0",
     "pyserial>=3.5",
+    "uvicorn[standard]>=0.46.0",
+    "websocket-client>=1.9.0",
 ]
 
 [project.scripts]

@@ -199,6 +199,8 @@ class DeviceStateStore:
         with self._lock:
             runtime = self._runtime_for_device(device_id)
             self._ensure_device_access(device_id, attribution)
+            if self._serial_session_for_device(device_id) is not None:
+                raise ConflictError(f"device already has an open serial session: {device_id}")
             backend_session = self.serial.open(runtime, baud_rate)
             public = SerialSession(
                 id=_short_id(),
@@ -259,10 +261,10 @@ class DeviceStateStore:
         session = self.open_serial(device_id=device_id, baud_rate=baud_rate, attribution=attribution)
         try:
             data = payload + (b"\n" if append_newline else b"")
-            self.write_serial(session.id, data)
+            self.write_serial(session.id, data, attribution=attribution)
             return read_until_quiet(self._serial_session(session.id).backend, max_bytes, quiet_time, timeout)
         finally:
-            self.close_serial(session.id)
+            self.close_serial(session.id, attribution=attribution)
 
     def status(self) -> dict[str, object]:
         with self._lock:
@@ -308,6 +310,12 @@ class DeviceStateStore:
         if session is None:
             raise NotFoundError(f"serial session not found: {session_id}")
         return session
+
+    def _serial_session_for_device(self, device_id: str) -> _OpenSerialSession | None:
+        for session in self._serial_sessions.values():
+            if session.public.device_id == device_id:
+                return session
+        return None
 
     def _ensure_serial_session_access(
         self,

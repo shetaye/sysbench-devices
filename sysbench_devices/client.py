@@ -1,4 +1,4 @@
-"""Python SDK over the public HTTP API."""
+"""Python SDK over the public HTTP/WebSocket API."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+from websocket import WebSocketConnectionClosedException, WebSocketTimeoutException, create_connection
 
 
 class SysbenchDevicesClient:
@@ -42,6 +44,21 @@ class SysbenchDevicesClient:
 
     def close_serial(self, session_id: str) -> None:
         self._request("DELETE", f"/serial/sessions/{session_id}")
+
+    def serial_stream(
+        self,
+        device_id: str,
+        baud_rate: int = 115200,
+        connect_timeout: float = 10.0,
+    ) -> "SerialStream":
+        return SerialStream(
+            url=self._websocket_url(
+                f"/serial/streams/{quote(device_id, safe='')}",
+                {"baud_rate": baud_rate},
+            ),
+            headers=self._websocket_headers(),
+            connect_timeout=connect_timeout,
+        )
 
     def run_serial(
         self,
@@ -131,3 +148,65 @@ class SysbenchDevicesClient:
         if not raw:
             return None
         return json.loads(raw.decode("utf-8"))
+
+    def _websocket_url(self, path: str, query: dict[str, Any]) -> str:
+        parsed = urlsplit(self.base_url)
+        scheme = {"http": "ws", "https": "wss"}.get(parsed.scheme, parsed.scheme)
+        base_path = parsed.path.rstrip("/")
+        return urlunsplit((scheme, parsed.netloc, f"{base_path}{path}", urlencode(query), ""))
+
+    def _websocket_headers(self) -> list[str]:
+        if self.api_key is None:
+            return []
+        return [f"X-API-Key: {self.api_key}"]
+
+
+class SerialStream:
+    """Blocking binary WebSocket stream compatible with bootloader byte I/O."""
+
+    def __init__(self, url: str, headers: list[str], connect_timeout: float) -> None:
+        self.url = url
+        self.headers = headers
+        self.connect_timeout = connect_timeout
+        self._socket: Any | None = None
+        self._buffer = bytearray()
+
+    def __enter__(self) -> "SerialStream":
+        self._socket = create_connection(self.url, header=self.headers, timeout=self.connect_timeout)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def read(self, max_bytes: int = 4096, timeout: float = 0.1) -> bytes:
+        if self._socket is None:
+            raise RuntimeError("serial stream is not open")
+        if self._buffer:
+            return self._drain_buffer(max_bytes)
+        self._socket.settimeout(timeout)
+        try:
+            frame = self._socket.recv()
+        except WebSocketTimeoutException:
+            return b""
+        except WebSocketConnectionClosedException:
+            return b""
+        if isinstance(frame, str):
+            raise RuntimeError("serial stream received a text frame")
+        self._buffer.extend(frame)
+        return self._drain_buffer(max_bytes)
+
+    def write(self, data: bytes) -> None:
+        if self._socket is None:
+            raise RuntimeError("serial stream is not open")
+        self._socket.send_binary(data)
+
+    def close(self) -> None:
+        if self._socket is None:
+            return
+        self._socket.close()
+        self._socket = None
+
+    def _drain_buffer(self, max_bytes: int) -> bytes:
+        chunk = bytes(self._buffer[:max_bytes])
+        del self._buffer[:max_bytes]
+        return chunk

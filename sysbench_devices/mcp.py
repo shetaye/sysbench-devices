@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -13,8 +13,15 @@ from mcp.server.fastmcp import FastMCP
 from sysbench_devices.client import SysbenchDevicesClient
 from sysbench_devices.logging_config import configure_logging
 from sysbench_devices.protocols.cs140e_bootloader import ARM_BASE
+from sysbench_devices.state import decode_bytes, encode_bytes
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _MCPSerialStream:
+    context: Any
+    stream: Any
 
 
 class MCPService:
@@ -22,6 +29,7 @@ class MCPService:
 
     def __init__(self, client: SysbenchDevicesClient) -> None:
         self.client = client
+        self._serial_streams: dict[str, _MCPSerialStream] = {}
 
     def list_devices(self) -> dict[str, Any]:
         return self.client.devices()
@@ -39,58 +47,58 @@ class MCPService:
     def power(self, device_id: str, action: str) -> dict[str, Any]:
         return self.client.power(device_id, action)
 
-    def serial_open(self, device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
-        return self.client.open_serial(device_id, baud_rate=baud_rate)
+    def open_serial(self, device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
+        session = self.client.open_serial(device_id, baud_rate=baud_rate)
+        try:
+            context = self.client.serial_stream(device_id)
+            stream = context.__enter__()
+        except BaseException:
+            self.client.close_serial(device_id)
+            raise
+        self._serial_streams[device_id] = _MCPSerialStream(context=context, stream=stream)
+        return session
 
-    def serial_read(self, session_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
-        return self.client.read_serial(session_id, max_bytes=max_bytes, timeout=timeout)
+    def read_serial(self, device_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
+        data = self._serial_stream(device_id).read(max_bytes=max_bytes, timeout=timeout)
+        return encode_bytes(data)
 
-    def serial_write(self, session_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
-        return self.client.write_serial(session_id, data, encoding=encoding)
+    def write_serial(self, device_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
+        payload = decode_bytes(data, encoding)
+        self._serial_stream(device_id).write(payload)
+        return {"bytes_written": len(payload)}
 
-    def serial_close(self, session_id: str) -> dict[str, str]:
-        self.client.close_serial(session_id)
-        return {"session_id": session_id}
+    def close_serial(self, device_id: str) -> dict[str, str]:
+        entry = self._serial_streams.pop(device_id, None)
+        try:
+            if entry is not None:
+                entry.context.__exit__(None, None, None)
+        finally:
+            self.client.close_serial(device_id)
+        return {"device_id": device_id}
 
-    def serial_run(
+    def bootload_file(
         self,
         device_id: str,
-        data: str,
-        encoding: str = "utf-8",
-        baud_rate: int = 115200,
-        append_newline: bool = True,
-        max_bytes: int = 4096,
-    ) -> dict[str, str]:
-        return self.client.run_serial(
-            device_id,
-            data,
-            encoding=encoding,
-            baud_rate=baud_rate,
-            append_newline=append_newline,
-            max_bytes=max_bytes,
-        )
-
-    def bootload_binary(
-        self,
-        device_id: str,
-        data: str,
-        encoding: str = "base64",
-        baud_rate: int = 115200,
+        binary_path: str,
         timeout: float = 10.0,
         arm_base: int = ARM_BASE,
         capture_output_seconds: float = 0.0,
         max_output_bytes: int = 4096,
     ) -> dict[str, Any]:
-        payload = _decode_tool_payload(data, encoding)
-        return self.client.bootload(
-            device_id=device_id,
-            payload=payload,
-            baud_rate=baud_rate,
+        return self.client.bootload_file(
+            stream=self._serial_stream(device_id),
+            path=binary_path,
             timeout=timeout,
             arm_base=arm_base,
             capture_output_seconds=capture_output_seconds,
             max_output_bytes=max_output_bytes,
         )
+
+    def _serial_stream(self, device_id: str) -> Any:
+        try:
+            return self._serial_streams[device_id].stream
+        except KeyError as exc:
+            raise RuntimeError(f"serial stream is not open for device: {device_id}") from exc
 
 
 def build_mcp_server(service: MCPService) -> FastMCP:
@@ -125,61 +133,38 @@ def build_mcp_server(service: MCPService) -> FastMCP:
         return service.power(device_id, action)
 
     @mcp.tool()
-    def serial_open(device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
+    def open_serial(device_id: str, baud_rate: int = 115200) -> dict[str, Any]:
         """Open a serial session."""
-        return service.serial_open(device_id, baud_rate=baud_rate)
+        return service.open_serial(device_id, baud_rate=baud_rate)
 
     @mcp.tool()
-    def serial_read(session_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
+    def read_serial(device_id: str, max_bytes: int = 4096, timeout: float = 0.1) -> dict[str, str]:
         """Read bytes from a serial session."""
-        return service.serial_read(session_id, max_bytes=max_bytes, timeout=timeout)
+        return service.read_serial(device_id, max_bytes=max_bytes, timeout=timeout)
 
     @mcp.tool()
-    def serial_write(session_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
+    def write_serial(device_id: str, data: str, encoding: str = "utf-8") -> dict[str, int]:
         """Write bytes to a serial session."""
-        return service.serial_write(session_id, data, encoding=encoding)
+        return service.write_serial(device_id, data, encoding=encoding)
 
     @mcp.tool()
-    def serial_close(session_id: str) -> dict[str, str]:
+    def close_serial(device_id: str) -> dict[str, str]:
         """Close a serial session."""
-        return service.serial_close(session_id)
+        return service.close_serial(device_id)
 
     @mcp.tool()
-    def serial_run(
+    def bootload_file(
         device_id: str,
-        data: str,
-        encoding: str = "utf-8",
-        baud_rate: int = 115200,
-        append_newline: bool = True,
-        max_bytes: int = 4096,
-    ) -> dict[str, str]:
-        """Open serial, write data, read until quiet, and close the session."""
-        return service.serial_run(
-            device_id=device_id,
-            data=data,
-            encoding=encoding,
-            baud_rate=baud_rate,
-            append_newline=append_newline,
-            max_bytes=max_bytes,
-        )
-
-    @mcp.tool()
-    def bootload_binary(
-        device_id: str,
-        data: str,
-        encoding: str = "base64",
-        baud_rate: int = 115200,
+        binary_path: str,
         timeout: float = 10.0,
         arm_base: int = ARM_BASE,
         capture_output_seconds: float = 0.0,
         max_output_bytes: int = 4096,
     ) -> dict[str, Any]:
-        """Upload a CS140E bootloader binary over a WebSocket serial stream."""
-        return service.bootload_binary(
+        """Upload a CS140E bootloader binary file over an open serial session."""
+        return service.bootload_file(
             device_id=device_id,
-            data=data,
-            encoding=encoding,
-            baud_rate=baud_rate,
+            binary_path=binary_path,
             timeout=timeout,
             arm_base=arm_base,
             capture_output_seconds=capture_output_seconds,
@@ -187,16 +172,6 @@ def build_mcp_server(service: MCPService) -> FastMCP:
         )
 
     return mcp
-
-
-def _decode_tool_payload(data: str, encoding: str) -> bytes:
-    if encoding == "base64":
-        return base64.b64decode(data.encode("ascii"))
-    if encoding == "hex":
-        return bytes.fromhex(data)
-    if encoding == "utf-8":
-        return data.encode("utf-8")
-    raise ValueError(f"unsupported payload encoding: {encoding}")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -70,7 +70,7 @@ def test_live_state_register_reserve_and_serial_open_close(tmp_path):
     registration = state.register(runtime.id, name="hardware-test", tags=("hardware",))
     reservation = state.reserve(admin_attribution(), device_id=registration.id)
     session = state.open_serial(registration.id, attribution=admin_attribution())
-    state.close_serial(session.id, attribution=admin_attribution())
+    state.close_serial(session.device_id, attribution=admin_attribution())
 
     assert reservation.device_id == registration.id
     assert session.device_id == registration.id

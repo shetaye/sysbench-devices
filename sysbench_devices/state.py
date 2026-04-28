@@ -203,48 +203,57 @@ class DeviceStateStore:
                 raise ConflictError(f"device already has an open serial session: {device_id}")
             backend_session = self.serial.open(runtime, baud_rate)
             public = SerialSession(
-                id=_short_id(),
                 device_id=device_id,
                 baud_rate=baud_rate,
                 attribution=attribution,
             )
-            self._serial_sessions[public.id] = _OpenSerialSession(public=public, backend=backend_session)
+            self._serial_sessions[device_id] = _OpenSerialSession(public=public, backend=backend_session)
             return public
 
     def read_serial(
         self,
-        session_id: str,
+        device_id: str,
         max_bytes: int = 4096,
         timeout: float = 0.1,
         attribution: ReservationAttribution | None = None,
     ) -> bytes:
         with self._lock:
-            session = self._serial_session(session_id)
+            session = self._serial_session(device_id)
             self._ensure_serial_session_access(session, attribution)
             return session.backend.read(max_bytes=max_bytes, timeout=timeout)
 
+    def get_serial_session(
+        self,
+        device_id: str,
+        attribution: ReservationAttribution | None = None,
+    ) -> SerialSession:
+        with self._lock:
+            session = self._serial_session(device_id)
+            self._ensure_serial_session_access(session, attribution)
+            return session.public
+
     def write_serial(
         self,
-        session_id: str,
+        device_id: str,
         data: bytes,
         attribution: ReservationAttribution | None = None,
     ) -> int:
         with self._lock:
-            session = self._serial_session(session_id)
+            session = self._serial_session(device_id)
             self._ensure_serial_session_access(session, attribution)
             return session.backend.write(data)
 
     def close_serial(
         self,
-        session_id: str,
+        device_id: str,
         attribution: ReservationAttribution | None = None,
     ) -> None:
         with self._lock:
-            session = self._serial_session(session_id)
+            session = self._serial_session(device_id)
             self._ensure_serial_session_access(session, attribution)
-            session = self._serial_sessions.pop(session_id, None)
+            session = self._serial_sessions.pop(device_id, None)
             if session is None:
-                raise NotFoundError(f"serial session not found: {session_id}")
+                raise NotFoundError(f"serial session not found for device: {device_id}")
             session.backend.close()
 
     def run_serial_command(
@@ -261,10 +270,10 @@ class DeviceStateStore:
         session = self.open_serial(device_id=device_id, baud_rate=baud_rate, attribution=attribution)
         try:
             data = payload + (b"\n" if append_newline else b"")
-            self.write_serial(session.id, data, attribution=attribution)
-            return read_until_quiet(self._serial_session(session.id).backend, max_bytes, quiet_time, timeout)
+            self.write_serial(device_id, data, attribution=attribution)
+            return read_until_quiet(self._serial_session(device_id).backend, max_bytes, quiet_time, timeout)
         finally:
-            self.close_serial(session.id, attribution=attribution)
+            self.close_serial(device_id, attribution=attribution)
 
     def status(self) -> dict[str, object]:
         with self._lock:
@@ -305,17 +314,14 @@ class DeviceStateStore:
                 return reservation
         return None
 
-    def _serial_session(self, session_id: str) -> _OpenSerialSession:
-        session = self._serial_sessions.get(session_id)
+    def _serial_session(self, device_id: str) -> _OpenSerialSession:
+        session = self._serial_sessions.get(device_id)
         if session is None:
-            raise NotFoundError(f"serial session not found: {session_id}")
+            raise NotFoundError(f"serial session not found for device: {device_id}")
         return session
 
     def _serial_session_for_device(self, device_id: str) -> _OpenSerialSession | None:
-        for session in self._serial_sessions.values():
-            if session.public.device_id == device_id:
-                return session
-        return None
+        return self._serial_sessions.get(device_id)
 
     def _ensure_serial_session_access(
         self,
@@ -325,7 +331,7 @@ class DeviceStateStore:
         if attribution is None or session.public.attribution is None:
             return
         reservation = Reservation(
-            id=session.public.id,
+            id=session.public.device_id,
             device_id=session.public.device_id,
             attribution=session.public.attribution,
         )

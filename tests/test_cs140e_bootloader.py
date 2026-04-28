@@ -18,7 +18,7 @@ from sysbench_devices.protocols.cs140e_bootloader import (
     PUT_PROG_INFO,
     BootloaderError,
     bootload,
-    bootload_via_sdk,
+    bootload_stream,
 )
 
 
@@ -83,7 +83,7 @@ def test_bootloader_success() -> None:
     assert mock.sent_bytes == bytes(expected)
     assert result.bytes_sent == len(code)
     assert result.crc32 == crc32(code) & 0xFFFFFFFF
-    assert result.session_id is None
+    assert result.device_id is None
 
 
 def test_bootloader_with_prints() -> None:
@@ -163,48 +163,13 @@ def test_bootloader_drains_extra_get_prog_info() -> None:
     assert result.bytes_sent == len(code)
 
 
-class FakeSDKClient:
-    def __init__(self, code: bytes) -> None:
-        code_crc = crc32(code) & 0xFFFFFFFF
-        self.reads: deque[bytes] = deque(
-            [
-                struct.pack("<I", GET_PROG_INFO),
-                struct.pack("<I", GET_CODE),
-                struct.pack("<I", code_crc),
-                struct.pack("<I", BOOT_SUCCESS),
-            ]
-        )
-        self.sent = bytearray()
-        self.calls: list[tuple] = []
-
-    def serial_stream(self, device_id: str, baud_rate: int = 115200, connect_timeout: float = 10.0) -> "FakeSDKClient":
-        self.calls.append(("serial_stream", device_id, baud_rate, connect_timeout))
-        return self
-
-    def __enter__(self) -> "FakeSDKClient":
-        self.calls.append(("stream_enter",))
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.calls.append(("stream_exit",))
-
-    def read(self, max_bytes: int = 4096, timeout: float = 0.1) -> bytes:
-        self.calls.append(("read", max_bytes, timeout))
-        return self.reads.popleft() if self.reads else b""
-
-    def write(self, data: bytes) -> None:
-        self.calls.append(("write", data))
-        self.sent.extend(data)
-
-
-def test_bootload_via_sdk_uses_websocket_serial_stream() -> None:
+def test_bootload_stream_uses_open_stream() -> None:
     code = b"program"
-    client = FakeSDKClient(code)
+    stream = MockStream(_standard_pi(code))
+    stream.device_id = "board-1"
 
-    result = bootload_via_sdk(client, "board-1", code, baud_rate=230400, timeout=1.0)
+    result = bootload_stream(stream, code, timeout=1.0)
 
-    assert result.session_id is None
+    assert result.device_id == "board-1"
     assert result.bytes_sent == len(code)
-    assert client.calls[0] == ("serial_stream", "board-1", 230400, 1.0)
-    assert client.calls[-1] == ("stream_exit",)
-    assert client.sent.endswith(struct.pack("<I", PUT_CODE) + code)
+    assert stream.sent_bytes.endswith(struct.pack("<I", PUT_CODE) + code)

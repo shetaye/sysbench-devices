@@ -139,7 +139,6 @@ def test_format_power_and_serial_outputs():
     )
     serial_text = _format_result(
         {
-            "id": "sess1234",
             "device_id": "abcd1234",
             "baud_rate": 115200,
             "attribution": {"kind": "socket", "id": "admin", "label": "Unix socket admin"},
@@ -149,7 +148,7 @@ def test_format_power_and_serial_outputs():
 
     assert "Power on: abcd1234" in power_text
     assert "Command: uhubctl -l 3-7.3 -p 1 -a on" in power_text
-    assert "Opened serial session: sess1234" in serial_text
+    assert "Opened serial for device: abcd1234" in serial_text
     assert "Attribution: socket:admin" in serial_text
 
 

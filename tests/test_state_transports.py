@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import stat
 import threading
@@ -72,6 +73,49 @@ def test_socket_rpc_server_smoke(tmp_path):
     assert socket_mode == 0o660
 
 
+def test_socket_serial_stream_moves_binary_frames(tmp_path):
+    state, _secret, _other_secret = make_state(tmp_path)
+    socket_path = tmp_path / "sbdevd.sock"
+    server = SocketRPCServer(socket_path, state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        rpc_client = SocketRPCClient(socket_path)
+        opened = rpc_client.call("serial.open", device_id="a4c91f2b", baud_rate=230400)
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1.0)
+            client.connect(str(socket_path))
+            client.sendall(
+                json.dumps({"method": "serial.stream", "params": {"device_id": opened["device_id"]}}).encode("utf-8")
+                + b"\n"
+            )
+            raw = bytearray()
+            while True:
+                byte = client.recv(1)
+                if byte == b"\n":
+                    break
+                raw.extend(byte)
+            assert json.loads(raw.decode("utf-8")) == {"ok": True, "result": {"device_id": "a4c91f2b"}}
+
+            backend_session = state.serial.sessions[-1]
+            backend_session.input_chunks.append(b"hello")
+            assert client.recv(5) == b"hello"
+
+            client.sendall(b"status")
+            for _ in range(20):
+                if backend_session.writes:
+                    break
+                time.sleep(0.01)
+            assert backend_session.writes == [b"status"]
+
+        rpc_client.call("serial.close", device_id=opened["device_id"])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_http_reservation_uses_api_key_attribution(tmp_path):
     state, secret, _other_secret = make_state(tmp_path)
     client = TestClient(build_http_app(state))
@@ -93,16 +137,16 @@ def test_http_rejects_reservation_without_api_key(tmp_path):
     assert response.status_code == 401
 
 
-def test_http_rejects_serial_read_without_api_key(tmp_path):
+def test_http_rejects_serial_close_without_api_key(tmp_path):
     state, secret, _other_secret = make_state(tmp_path)
     client = TestClient(build_http_app(state))
     opened = client.post(
-        "/serial/sessions",
-        json={"device_id": "a4c91f2b"},
+        "/devices/a4c91f2b/serial",
+        json={},
         headers={"X-API-Key": secret},
     ).json()
 
-    response = client.get(f"/serial/sessions/{opened['id']}/read")
+    response = client.delete(f"/devices/{opened['device_id']}/serial")
 
     assert response.status_code == 401
 
@@ -125,8 +169,13 @@ def test_http_rejects_release_by_different_api_key(tmp_path):
 def test_serial_stream_moves_binary_frames(tmp_path):
     state, secret, _other_secret = make_state(tmp_path)
     client = TestClient(build_http_app(state))
+    opened = client.post(
+        "/devices/a4c91f2b/serial",
+        json={"baud_rate": 230400},
+        headers={"X-API-Key": secret},
+    ).json()
 
-    with client.websocket_connect("/serial/streams/a4c91f2b?baud_rate=230400", headers={"X-API-Key": secret}) as websocket:
+    with client.websocket_connect(f"/devices/{opened['device_id']}/serial/stream", headers={"X-API-Key": secret}) as websocket:
         backend_session = state.serial.sessions[-1]
         backend_session.input_chunks.append(b"hello")
         assert websocket.receive_bytes() == b"hello"
@@ -138,6 +187,8 @@ def test_serial_stream_moves_binary_frames(tmp_path):
             time.sleep(0.01)
 
         assert backend_session.writes == [b"status"]
+
+    assert client.delete(f"/devices/{opened['device_id']}/serial", headers={"X-API-Key": secret}).status_code == 200
 
 
 def test_sdk_serial_stream_uses_live_websocket(tmp_path):
@@ -156,18 +207,22 @@ def test_sdk_serial_stream_uses_live_websocket(tmp_path):
             time.sleep(0.01)
 
         client = SysbenchDevicesClient(base_url=f"http://127.0.0.1:{port}", api_key=secret)
-        with client.serial_stream("a4c91f2b") as stream:
-            backend_session = state.serial.sessions[-1]
-            backend_session.input_chunks.append(b"pong")
-            assert stream.read(timeout=1.0) == b"pong"
-            stream.write(b"ping")
+        session = client.open_serial("a4c91f2b")
+        try:
+            with client.serial_stream(session["device_id"]) as stream:
+                backend_session = state.serial.sessions[-1]
+                backend_session.input_chunks.append(b"pong")
+                assert stream.read(timeout=1.0) == b"pong"
+                stream.write(b"ping")
 
-            for _ in range(20):
-                if backend_session.writes:
-                    break
-                time.sleep(0.01)
+                for _ in range(20):
+                    if backend_session.writes:
+                        break
+                    time.sleep(0.01)
 
-            assert backend_session.writes == [b"ping"]
+                assert backend_session.writes == [b"ping"]
+        finally:
+            client.close_serial(session["device_id"])
     finally:
         server.should_exit = True
         thread.join(timeout=2)
@@ -181,7 +236,7 @@ def test_only_one_serial_session_per_device(tmp_path):
         with pytest.raises(ConflictError, match="already has an open serial session"):
             state.open_serial("a4c91f2b", attribution=attr)
     finally:
-        state.close_serial(session.id, attribution=attr)
+        state.close_serial(session.device_id, attribution=attr)
 
 
 def test_socket_admin_can_release_api_key_reservation(tmp_path):

@@ -54,23 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     serial_open = serial_sub.add_parser("open")
     serial_open.add_argument("device_id")
     serial_open.add_argument("--baud-rate", type=int, default=115200)
-    serial_read = serial_sub.add_parser("read")
-    serial_read.add_argument("session_id")
-    serial_read.add_argument("--max-bytes", type=int, default=4096)
-    serial_read.add_argument("--timeout", type=float, default=0.1)
-    serial_write = serial_sub.add_parser("write")
-    serial_write.add_argument("session_id")
-    serial_write.add_argument("data")
-    serial_write.add_argument("--encoding", choices=["utf-8", "base64", "hex"], default="utf-8")
+    serial_stream = serial_sub.add_parser("stream")
+    serial_stream.add_argument("device_id")
     serial_close = serial_sub.add_parser("close")
-    serial_close.add_argument("session_id")
-    serial_run = serial_sub.add_parser("run")
-    serial_run.add_argument("device_id")
-    serial_run.add_argument("data")
-    serial_run.add_argument("--encoding", choices=["utf-8", "base64", "hex"], default="utf-8")
-    serial_run.add_argument("--baud-rate", type=int, default=115200)
-    serial_run.add_argument("--no-newline", action="store_true")
-    serial_run.add_argument("--max-bytes", type=int, default=4096)
+    serial_close.add_argument("device_id")
 
     api_keys = sub.add_parser("api-keys")
     api_sub = api_keys.add_subparsers(dest="api_key_command", required=True)
@@ -135,33 +122,12 @@ def _dispatch_serial(client: SocketRPCClient, args: argparse.Namespace) -> Any:
     match args.serial_command:
         case "open":
             return client.call("serial.open", device_id=args.device_id, baud_rate=args.baud_rate)
-        case "read":
-            return client.call(
-                "serial.read",
-                session_id=args.session_id,
-                max_bytes=args.max_bytes,
-                timeout=args.timeout,
-            )
-        case "write":
-            return client.call(
-                "serial.write",
-                session_id=args.session_id,
-                data=args.data,
-                encoding=args.encoding,
-            )
+        case "stream":
+            client.stream_serial(args.device_id, sys.stdin.buffer, sys.stdout.buffer)
+            return None
         case "close":
-            client.call("serial.close", session_id=args.session_id)
-            return {"session_id": args.session_id}
-        case "run":
-            return client.call(
-                "serial.run",
-                device_id=args.device_id,
-                data=args.data,
-                encoding=args.encoding,
-                baud_rate=args.baud_rate,
-                append_newline=not args.no_newline,
-                max_bytes=args.max_bytes,
-            )
+            client.call("serial.close", device_id=args.device_id)
+            return {"device_id": args.device_id}
         case _:
             raise RuntimeError(f"unsupported serial command: {args.serial_command}")
 
@@ -339,29 +305,15 @@ def _format_serial_result(result: Any, args: argparse.Namespace) -> str:
         case "open":
             return "\n".join(
                 [
-                    f"Opened serial session: {result.get('id', '')}",
-                    f"Device: {result.get('device_id', '')}",
+                    f"Opened serial for device: {result.get('device_id', '')}",
                     f"Baud: {result.get('baud_rate', '')}",
                     f"Attribution: {_attribution_summary(result.get('attribution'))}",
                 ]
             )
-        case "read":
-            return _format_serial_payload("Serial read", result)
-        case "write":
-            return f"Wrote {result.get('bytes_written', 0)} bytes to serial session {args.session_id}."
         case "close":
-            return f"Closed serial session: {result.get('session_id', '')}"
-        case "run":
-            return _format_serial_payload("Serial response", result)
+            return f"Closed serial for device: {result.get('device_id', '')}"
         case _:
             return json.dumps(result, indent=2, sort_keys=True)
-
-
-def _format_serial_payload(title: str, result: dict[str, Any]) -> str:
-    encoding = result.get("encoding", "")
-    data = result.get("data", "")
-    return "\n".join([f"{title} ({encoding}):", str(data)])
-
 
 def _format_api_keys_result(result: Any, args: argparse.Namespace) -> str:
     match args.api_key_command:

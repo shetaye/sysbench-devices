@@ -47,10 +47,10 @@ device discovery, reservations, power operations, and serial sessions.
 Use these client paths:
 
 - Use `sbdevctl` for all management through the Unix socket.
-- Use HTTP for automation: devices, reservations, power, serial sessions, and
-  serial run.
-- Use WebSocket binary streams for bidirectional byte-oriented serial workflows
-  such as bootloading.
+- Use HTTP for automation: devices, reservations, power, and serial session
+  open/close.
+- Use WebSocket binary streams attached to serial sessions for bidirectional
+  byte-oriented workflows such as bootloading.
 - Use the Python SDK and MCP server over the daemon HTTP/WebSocket API.
 - Use API keys for HTTP/WebSocket reservation attribution.
 - Expect Unix socket reservations to use the built-in `socket:admin`
@@ -197,11 +197,12 @@ Use serial:
 
 ```sh
 sbdevctl serial open DEVICE_ID --baud-rate 115200
-sbdevctl serial write SESSION_ID "help"
-sbdevctl serial read SESSION_ID --max-bytes 4096 --timeout 0.2
-sbdevctl serial close SESSION_ID
-sbdevctl serial run DEVICE_ID "status"
+sbdevctl serial stream DEVICE_ID
+sbdevctl serial close DEVICE_ID
 ```
+
+`serial stream` connects stdin and stdout directly to the open device serial
+stream.
 
 Manage HTTP API keys:
 
@@ -239,16 +240,15 @@ Use MCP tools for daemon-backed operations:
 - `reserve`
 - `release`
 - `power`
-- `serial_open`
-- `serial_read`
-- `serial_write`
-- `serial_close`
-- `serial_run`
-- `bootload_binary`
+- `open_serial`
+- `read_serial`
+- `write_serial`
+- `close_serial`
+- `bootload_file`
 
-Send `bootload_binary` payloads as `base64`, `hex`, or `utf-8`. The tool opens
-a WebSocket serial stream, runs the CS140E bootloader protocol over binary
-frames, and closes the stream.
+`open_serial` opens a daemon serial session and an MCP-owned WebSocket stream for
+the device ID. Use `read_serial`, `write_serial`, `close_serial`, and
+`bootload_file` with that same device ID.
 
 ## Troubleshooting
 

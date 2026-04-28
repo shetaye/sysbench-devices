@@ -181,14 +181,16 @@ class ApiKeyRecord:
 
 @dataclass(frozen=True)
 class SerialSession:
-    id: str
     device_id: str
     baud_rate: int
     attribution: ReservationAttribution | None = None
 
+    @property
+    def id(self) -> str:
+        return self.device_id
+
     def to_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id,
             "device_id": self.device_id,
             "baud_rate": self.baud_rate,
             "attribution": None if self.attribution is None else self.attribution.to_dict(),

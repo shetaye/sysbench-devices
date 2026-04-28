@@ -7,16 +7,19 @@ import logging
 import os
 import socket
 import socketserver
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from sysbench_devices.errors import SysbenchDevicesError, ValidationError, error_response
 from sysbench_devices.models import PowerAction
-from sysbench_devices.state import DeviceStateStore, admin_attribution, decode_bytes, encode_bytes
+from sysbench_devices.state import DeviceStateStore, admin_attribution
 
 JSON = dict[str, Any]
 logger = logging.getLogger(__name__)
+STREAM_BYTES = 4096
+STREAM_READ_TIMEOUT = 0.05
 
 
 class SocketRPCConnectionError(RuntimeError):
@@ -63,13 +66,43 @@ class _SocketRPCHandler(socketserver.StreamRequestHandler):
                 params = request.get("params", {})
                 if not isinstance(params, dict):
                     raise ValidationError("params must be an object")
+                if method == "serial.stream":
+                    self._handle_serial_stream(params)
+                    return
                 result = dispatch_socket_method(self.server.state, method, params, self.server.doctor)
                 logger.debug("socket RPC method=%s ok", method)
                 response = {"ok": True, "result": result}
             except BaseException as exc:
                 logger.exception("socket RPC request failed")
                 response = {"ok": False, "error": error_response(exc)}
-            self.wfile.write(json.dumps(response).encode("utf-8") + b"\n")
+            self._write_response(response)
+
+    def _handle_serial_stream(self, params: JSON) -> None:
+        attr = admin_attribution()
+        device_id = str(params["device_id"])
+        self.server.state.get_serial_session(device_id, attr)
+        self._write_response({"ok": True, "result": {"device_id": device_id}})
+
+        stop = threading.Event()
+        reader = threading.Thread(
+            target=_serial_to_socket,
+            args=(self.server.state, self.request, device_id, stop),
+            daemon=True,
+        )
+        reader.start()
+        try:
+            while not stop.is_set():
+                data = self.request.recv(STREAM_BYTES)
+                if not data:
+                    return
+                self.server.state.write_serial(device_id, data, attr)
+        finally:
+            stop.set()
+            reader.join(timeout=1)
+
+    def _write_response(self, response: JSON) -> None:
+        self.wfile.write(json.dumps(response).encode("utf-8") + b"\n")
+        self.wfile.flush()
 
 
 class SocketRPCClient:
@@ -78,17 +111,7 @@ class SocketRPCClient:
 
     def call(self, method: str, **params: Any) -> Any:
         logger.debug("socket RPC client call method=%s", method)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            try:
-                client.connect(self.socket_path)
-            except FileNotFoundError as exc:
-                raise SocketRPCConnectionError(f"socket not found: {self.socket_path}") from exc
-            except PermissionError as exc:
-                raise SocketRPCConnectionError(f"permission denied for socket: {self.socket_path}") from exc
-            except ConnectionRefusedError as exc:
-                raise SocketRPCConnectionError(f"socket is not accepting connections: {self.socket_path}") from exc
-            except OSError as exc:
-                raise SocketRPCConnectionError(f"could not connect to socket {self.socket_path}: {exc}") from exc
+        with self._connect() as client:
             file = client.makefile("rwb")
             file.write(json.dumps({"method": method, "params": params}).encode("utf-8") + b"\n")
             file.flush()
@@ -100,6 +123,54 @@ class SocketRPCClient:
             return response["result"]
         error = response.get("error", {})
         raise RuntimeError(f"{error.get('code', 'error')}: {error.get('message', '')}")
+
+    def stream_serial(self, device_id: str, input_stream: Any, output_stream: Any) -> None:
+        logger.debug("socket RPC client serial stream device_id=%s", device_id)
+        with self._connect() as client:
+            client.sendall(
+                json.dumps({"method": "serial.stream", "params": {"device_id": device_id}}).encode("utf-8") + b"\n"
+            )
+            response = _read_response(client)
+            if not response.get("ok"):
+                error = response.get("error", {})
+                raise RuntimeError(f"{error.get('code', 'error')}: {error.get('message', '')}")
+
+            stop = threading.Event()
+            reader = threading.Thread(target=_socket_to_output, args=(client, output_stream, stop), daemon=True)
+            reader.start()
+            try:
+                while not stop.is_set():
+                    chunk = input_stream.read(STREAM_BYTES)
+                    if not chunk:
+                        return
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    client.sendall(chunk)
+            finally:
+                stop.set()
+                try:
+                    client.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                reader.join(timeout=1)
+
+    def _connect(self) -> socket.socket:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.connect(self.socket_path)
+        except FileNotFoundError as exc:
+            client.close()
+            raise SocketRPCConnectionError(f"socket not found: {self.socket_path}") from exc
+        except PermissionError as exc:
+            client.close()
+            raise SocketRPCConnectionError(f"permission denied for socket: {self.socket_path}") from exc
+        except ConnectionRefusedError as exc:
+            client.close()
+            raise SocketRPCConnectionError(f"socket is not accepting connections: {self.socket_path}") from exc
+        except OSError as exc:
+            client.close()
+            raise SocketRPCConnectionError(f"could not connect to socket {self.socket_path}: {exc}") from exc
+        return client
 
 
 def dispatch_socket_method(
@@ -148,31 +219,9 @@ def dispatch_socket_method(
                 baud_rate=int(params.get("baud_rate", 115200)),
                 attribution=attr,
             ).to_dict()
-        case "serial.read":
-            data = state.read_serial(
-                session_id=str(params["session_id"]),
-                max_bytes=int(params.get("max_bytes", 4096)),
-                timeout=float(params.get("timeout", 0.1)),
-                attribution=attr,
-            )
-            return encode_bytes(data)
-        case "serial.write":
-            payload = decode_bytes(str(params.get("data", "")), str(params.get("encoding", "utf-8")))
-            return {"bytes_written": state.write_serial(str(params["session_id"]), payload, attribution=attr)}
         case "serial.close":
-            state.close_serial(str(params["session_id"]), attribution=attr)
+            state.close_serial(str(params["device_id"]), attribution=attr)
             return None
-        case "serial.run":
-            payload = decode_bytes(str(params.get("data", "")), str(params.get("encoding", "utf-8")))
-            data = state.run_serial_command(
-                device_id=str(params["device_id"]),
-                payload=payload,
-                baud_rate=int(params.get("baud_rate", 115200)),
-                append_newline=bool(params.get("append_newline", True)),
-                max_bytes=int(params.get("max_bytes", 4096)),
-                attribution=attr,
-            )
-            return encode_bytes(data)
         case "api_keys.list":
             return list(state.list_api_keys())
         case "api_keys.create":
@@ -189,3 +238,38 @@ def dispatch_socket_method(
             return report.to_dict()
         case _:
             raise ValidationError(f"unknown method: {method}")
+
+
+def _serial_to_socket(state: DeviceStateStore, sock: socket.socket, device_id: str, stop: threading.Event) -> None:
+    attr = admin_attribution()
+    try:
+        while not stop.is_set():
+            data = state.read_serial(device_id, STREAM_BYTES, STREAM_READ_TIMEOUT, attr)
+            if data:
+                sock.sendall(data)
+    except (OSError, SysbenchDevicesError):
+        stop.set()
+
+
+def _socket_to_output(sock: socket.socket, output_stream: Any, stop: threading.Event) -> None:
+    try:
+        while not stop.is_set():
+            data = sock.recv(STREAM_BYTES)
+            if not data:
+                return
+            output_stream.write(data)
+            output_stream.flush()
+    finally:
+        stop.set()
+
+
+def _read_response(sock: socket.socket) -> JSON:
+    raw = bytearray()
+    while True:
+        chunk = sock.recv(1)
+        if not chunk:
+            raise RuntimeError("empty RPC response")
+        if chunk == b"\n":
+            break
+        raw.extend(chunk)
+    return json.loads(raw.decode("utf-8"))

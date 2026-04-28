@@ -7,6 +7,7 @@ import struct
 import time
 from binascii import crc32
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from sysbench_devices.errors import SysbenchDevicesError
@@ -43,13 +44,9 @@ class BootloaderStream(Protocol):
     def write(self, data: bytes) -> None: ...
 
 
-class SerialStreamClient(Protocol):
-    def serial_stream(self, device_id: str, baud_rate: int = 115200, connect_timeout: float = 10.0) -> Any: ...
-
-
 @dataclass(frozen=True)
 class BootloadResult:
-    session_id: str | None
+    device_id: str | None
     bytes_sent: int
     crc32: int
     arm_base: int
@@ -58,7 +55,7 @@ class BootloadResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "session_id": self.session_id,
+            "device_id": self.device_id,
             "bytes_sent": self.bytes_sent,
             "crc32": self.crc32,
             "arm_base": self.arm_base,
@@ -187,7 +184,7 @@ def bootload(
         raise BootloaderError(f"expected BOOT_SUCCESS (0x{BOOT_SUCCESS:08X}), got 0x{op:08X}")
 
     return BootloadResult(
-        session_id=getattr(stream, "session_id", None),
+        device_id=getattr(stream, "device_id", None),
         bytes_sent=len(code),
         crc32=code_crc,
         arm_base=arm_base,
@@ -195,36 +192,42 @@ def bootload(
     )
 
 
-def bootload_via_sdk(
-    client: SerialStreamClient,
-    device_id: str,
+def bootload_stream(
+    stream: BootloaderStream,
     payload: bytes,
-    baud_rate: int = 115200,
     timeout: float = 10.0,
     arm_base: int = ARM_BASE,
     capture_output_seconds: float = 0.0,
     max_output_bytes: int = CHUNK_SIZE,
 ) -> BootloadResult:
-    with client.serial_stream(device_id, baud_rate=baud_rate, connect_timeout=timeout) as stream:
-        result = bootload(stream, payload, timeout=timeout, arm_base=arm_base)
-        captured_output = _capture_output(stream, capture_output_seconds, max_output_bytes)
-        return BootloadResult(
-            session_id=getattr(stream, "session_id", None),
-            bytes_sent=result.bytes_sent,
-            crc32=result.crc32,
-            arm_base=result.arm_base,
-            prints=result.prints,
-            captured_output=captured_output,
-        )
+    result = bootload(stream, payload, timeout=timeout, arm_base=arm_base)
+    captured_output = _capture_output(stream, capture_output_seconds, max_output_bytes)
+    return BootloadResult(
+        device_id=getattr(stream, "device_id", None),
+        bytes_sent=result.bytes_sent,
+        crc32=result.crc32,
+        arm_base=result.arm_base,
+        prints=result.prints,
+        captured_output=captured_output,
+    )
 
 
-def upload_binary(
-    client: SerialStreamClient,
-    device_id: str,
-    payload: bytes,
-    baud_rate: int = 115200,
+def bootload_file(
+    stream: BootloaderStream,
+    path: str | Path,
+    timeout: float = 10.0,
+    arm_base: int = ARM_BASE,
+    capture_output_seconds: float = 0.0,
+    max_output_bytes: int = CHUNK_SIZE,
 ) -> BootloadResult:
-    return bootload_via_sdk(client=client, device_id=device_id, payload=payload, baud_rate=baud_rate)
+    return bootload_stream(
+        stream=stream,
+        payload=Path(path).read_bytes(),
+        timeout=timeout,
+        arm_base=arm_base,
+        capture_output_seconds=capture_output_seconds,
+        max_output_bytes=max_output_bytes,
+    )
 
 
 def _capture_output(stream: BootloaderStream, seconds: float, max_bytes: int) -> bytes:

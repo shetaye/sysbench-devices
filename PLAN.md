@@ -16,10 +16,10 @@ hub port.
 - All entrypoints installable as `uv` tools.
 - Python SDK over the daemon HTTP/WebSocket API.
 - HTTP API for operational use: device listing, reservations, power control,
-  serial sessions, and one-shot serial commands.
+  serial sessions, and serial streams.
 - WebSocket API for bidirectional byte-oriented serial streams.
 - Unix socket transport as an `sbdevctl`-only superset control surface: all
-  management operations plus the JSON operational capabilities.
+  management operations plus local operational capabilities.
 - API keys for HTTP/WebSocket reservation attribution; Unix socket reservations
   use a special `admin` attribution ID.
 - No users, passwords, login sessions, role model, or web UI.
@@ -57,11 +57,9 @@ Carry forward:
 - Reservations to prevent conflicting concurrent access, attributed to API keys
   for HTTP callers and to `admin` for Unix socket callers.
 - Power control using `uhubctl` actions: `on`, `off`, `cycle`.
-- UART open/read/write/close sessions.
+- UART open/stream/close sessions.
 - UART baud-rate configuration.
-- One-shot serial command helper.
-- Binary-safe payload encodings for JSON serial workflows and native binary
-  frames for WebSocket serial streams.
+- Native binary frames for serial streams.
 - CS140E/RPi bootloader protocol helper as an optional protocol module.
 
 Delete or replace:
@@ -220,7 +218,7 @@ ID guidance:
 - Keep reservations in memory only.
 - Attach API key attribution to reservations created through the HTTP API and
   `admin` attribution to reservations created through the Unix socket.
-- Generate short hex reservation/session IDs where an ID is needed.
+- Generate short hex reservation IDs where an ID is needed.
 
 Tests:
 
@@ -236,9 +234,9 @@ Tests:
 
 `rpc.py`
 
-- Unix socket request/response protocol for the `sbdevctl` superset control
-  surface.
-- Prefer newline-delimited JSON for minimal implementation and easy debugging.
+- Unix socket protocol for the `sbdevctl` superset control surface.
+- Prefer newline-delimited JSON for request/response methods and raw bytes for
+  serial stream mode.
 - Map daemon exceptions into structured error responses.
 - Do not treat this protocol as a public SDK surface. The only official client
   is `sbdevctl`.
@@ -263,14 +261,15 @@ Tests:
 
 - HTTP API for the operational surface exposed to automation and tools.
 - Provide endpoints for device listing, reservation create/release/list, power
-  actions, serial session open/read/write/close, and one-shot serial command.
-- Provide a WebSocket endpoint for bidirectional serial byte streams.
+  actions, and serial session open/close.
+- Provide a WebSocket endpoint for bidirectional serial byte streams attached to
+  open serial sessions.
 - Require an API key for reservation creation so reservations can be attributed
   to a stable caller. Use the same attribution for reservation-scoped power and
   serial operations.
 - Do not expose registry mutation, API key management, daemon doctor, or other
   management operations over HTTP.
-- Use binary-safe request/response encodings for serial payloads.
+- Use binary WebSocket frames for serial payloads.
 - Keep HTTP operational semantics aligned with the matching Unix socket
   operational methods.
 
@@ -282,12 +281,9 @@ GET    /reservations
 POST   /reservations
 DELETE /reservations/{reservation-id}
 POST   /devices/{device-id}/power
-POST   /serial/sessions
-GET    /serial/sessions/{session-id}/read
-POST   /serial/sessions/{session-id}/write
-DELETE /serial/sessions/{session-id}
-POST   /serial/run
-WS     /serial/streams/{device-id}?baud_rate=115200
+POST   /devices/{device-id}/serial
+DELETE /devices/{device-id}/serial
+WS     /devices/{device-id}/serial/stream
 ```
 
 Tests:
@@ -352,8 +348,7 @@ sbdevctl reserve --tag TAG [--tag TAG ...]
 sbdevctl release <reservation-id>
 sbdevctl reservations
 sbdevctl power <device-id> on|off|cycle
-sbdevctl serial open/read/write/close
-sbdevctl serial run <device-id> COMMAND
+sbdevctl serial open/stream/close
 sbdevctl api-keys list
 sbdevctl api-keys create --id ID --label LABEL
 sbdevctl api-keys revoke <key-id>
@@ -604,9 +599,9 @@ Completed baseline:
     `BOOT_ERROR`, and `BOOT_SUCCESS` handling into
     `protocols/cs140e_bootloader.py`.
   - Added a WebSocket serial stream adapter that reads and writes binary frames
-    and closes the stream after upload.
-  - Added SDK helpers `bootload` and `bootload_file`.
-  - Added MCP `bootload_binary`, backed by the SDK WebSocket serial stream.
+    for open serial sessions.
+  - Added SDK stream-based helpers `bootload` and `bootload_file`.
+  - Added MCP `bootload_file`, backed by the open MCP serial stream.
   - Added bootloader protocol tests for success, print-string handling, boot
     errors, CRC mismatch, garbage before sync, extra `GET_PROG_INFO`, and SDK
     session lifecycle.
@@ -689,7 +684,7 @@ Phase 4 implements real logging and real MCP.
    official Python MCP SDK.
 5. Done: expose SDK-backed MCP tools for daemon operational capabilities:
    devices, reservations, reserve/release, power, serial open/read/write/close,
-   and serial run.
+   and bootload file upload.
 6. Done: add MCP/logging unit tests.
 
 ## Phase 5 Plan

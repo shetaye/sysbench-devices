@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import threading
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -56,6 +57,7 @@ def test_socket_rpc_server_smoke(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        socket_mode = stat.S_IMODE(socket_path.stat().st_mode)
         client = SocketRPCClient(socket_path)
         result = client.call("devices")
     finally:
@@ -64,6 +66,7 @@ def test_socket_rpc_server_smoke(tmp_path):
         thread.join(timeout=2)
 
     assert result["devices"][0]["id"] == "a4c91f2b"
+    assert socket_mode == 0o660
 
 
 def test_http_reservation_uses_api_key_attribution(tmp_path):

@@ -209,6 +209,11 @@ class DoctorCheck:
 class DoctorReport:
     ok: bool
     checks: tuple[DoctorCheck, ...]
+    details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"ok": self.ok, "checks": [check.to_dict() for check in self.checks]}
+        return {
+            "ok": self.ok,
+            "checks": [check.to_dict() for check in self.checks],
+            "details": dict(self.details),
+        }

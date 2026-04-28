@@ -19,6 +19,10 @@ JSON = dict[str, Any]
 logger = logging.getLogger(__name__)
 
 
+class SocketRPCConnectionError(RuntimeError):
+    """Unix socket connection failure."""
+
+
 class SocketRPCServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     allow_reuse_address = False
@@ -37,6 +41,7 @@ class SocketRPCServer(socketserver.ThreadingUnixStreamServer):
             logger.warning("removing stale socket path %s", self.socket_path)
             self.socket_path.unlink()
         super().__init__(str(self.socket_path), _SocketRPCHandler)
+        self.socket_path.chmod(0o660)
         logger.info("socket RPC listening on %s", self.socket_path)
 
     def server_close(self) -> None:
@@ -74,7 +79,16 @@ class SocketRPCClient:
     def call(self, method: str, **params: Any) -> Any:
         logger.debug("socket RPC client call method=%s", method)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.connect(self.socket_path)
+            try:
+                client.connect(self.socket_path)
+            except FileNotFoundError as exc:
+                raise SocketRPCConnectionError(f"socket not found: {self.socket_path}") from exc
+            except PermissionError as exc:
+                raise SocketRPCConnectionError(f"permission denied for socket: {self.socket_path}") from exc
+            except ConnectionRefusedError as exc:
+                raise SocketRPCConnectionError(f"socket is not accepting connections: {self.socket_path}") from exc
+            except OSError as exc:
+                raise SocketRPCConnectionError(f"could not connect to socket {self.socket_path}: {exc}") from exc
             file = client.makefile("rwb")
             file.write(json.dumps({"method": method, "params": params}).encode("utf-8") + b"\n")
             file.flush()

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 from sysbench_devices.daemon import default_socket_path
-from sysbench_devices.rpc import SocketRPCClient
+from sysbench_devices.rpc import SocketRPCClient, SocketRPCConnectionError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,7 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     client = SocketRPCClient(args.socket)
-    result = _dispatch(client, args)
+    try:
+        result = _dispatch(client, args)
+    except SocketRPCConnectionError as exc:
+        _print_connection_error(exc, args)
+        return 2
     _print_result(result, args)
     return 0
 
@@ -183,6 +188,19 @@ def _print_result(result: Any, args: argparse.Namespace) -> None:
     formatted = _format_result(result, args)
     if formatted:
         print(formatted)
+
+
+def _print_connection_error(exc: SocketRPCConnectionError, args: argparse.Namespace) -> None:
+    message = str(exc)
+    hint = (
+        "Start sbdevd, pass --socket /run/sysbench-devices/sbdevd.sock, "
+        "or set SBDEVD_SOCKET to the daemon socket path."
+    )
+    if args.json:
+        print(json.dumps({"error": {"code": "socket_connection_error", "message": message, "hint": hint}}, sort_keys=True))
+        return
+    print(f"sbdevctl: {message}", file=sys.stderr)
+    print(f"Hint: {hint}", file=sys.stderr)
 
 
 def _format_result(result: Any, args: argparse.Namespace) -> str:
@@ -387,6 +405,8 @@ def _format_doctor(result: dict[str, Any], verbose: bool) -> str:
             hint = _doctor_hint(str(check.get("name", "")), str(check.get("detail", "")))
             if hint:
                 lines.append(f"     hint: {hint}")
+    if verbose:
+        lines.extend(_format_doctor_details(result.get("details", {})))
     return "\n".join(lines)
 
 
@@ -402,6 +422,76 @@ def _doctor_hint(name: str, detail: str) -> str | None:
     if name == "socket_path":
         return "Create the socket parent directory or choose a writable path with SBDEVD_SOCKET."
     return None
+
+
+def _format_doctor_details(details: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    lines.append("")
+    lines.append("Pyserial devices:")
+    serial_ports = details.get("serial_ports", [])
+    if serial_ports:
+        lines.extend(_table(
+            ["DEVICE", "VID:PID", "SERIAL", "LOCATION", "PRODUCT"],
+            [
+                [
+                    port.get("device", ""),
+                    _vid_pid(port),
+                    port.get("serial_number") or "",
+                    port.get("normalized_location") or port.get("location") or "",
+                    port.get("product") or "",
+                ]
+                for port in serial_ports
+            ],
+        ))
+    else:
+        lines.append("none")
+
+    lines.append("")
+    lines.append("Uhubctl devices:")
+    uhubctl_devices = details.get("uhubctl_devices", [])
+    if uhubctl_devices:
+        lines.extend(_table(
+            ["POWER", "USB PATH", "VID:PID", "SERIAL", "PRODUCT"],
+            [
+                [
+                    device.get("power_target", ""),
+                    device.get("usb_path", ""),
+                    device.get("vid_pid") or _vid_pid(device),
+                    device.get("serial") or "",
+                    device.get("product") or "",
+                ]
+                for device in uhubctl_devices
+            ],
+        ))
+    else:
+        lines.append("none")
+
+    lines.append("")
+    lines.append("Registry devices:")
+    registry_devices = details.get("registry_devices", [])
+    if registry_devices:
+        lines.extend(_table(
+            ["ID", "NAME", "TAGS"],
+            [
+                [
+                    device.get("id", ""),
+                    device.get("name") or "",
+                    ",".join(device.get("tags", [])),
+                ]
+                for device in registry_devices
+            ],
+        ))
+    else:
+        lines.append("none")
+    return lines
+
+
+def _vid_pid(item: dict[str, Any]) -> str:
+    vid = item.get("vid")
+    pid = item.get("pid")
+    if vid and pid:
+        return f"{vid}:{pid}"
+    return ""
 
 
 def _format_key_values(result: dict[str, Any]) -> str:

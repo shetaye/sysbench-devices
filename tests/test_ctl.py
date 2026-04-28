@@ -1,6 +1,7 @@
+import json
 from argparse import Namespace
 
-from sysbench_devices.ctl import _format_result
+from sysbench_devices.ctl import _format_result, main
 
 
 def test_format_doctor_verbose_includes_remediation_hint():
@@ -20,6 +21,50 @@ def test_format_doctor_verbose_includes_remediation_hint():
     assert "Doctor: unhealthy" in text
     assert "fail uhubctl.usable" in text
     assert "Configure udev/group permissions" in text
+
+
+def test_format_doctor_verbose_includes_discovery_details():
+    result = {
+        "ok": True,
+        "checks": [
+            {"name": "uhubctl.installed", "ok": True, "detail": "/usr/sbin/uhubctl"},
+        ],
+        "details": {
+            "serial_ports": [
+                {
+                    "device": "/dev/ttyUSB0",
+                    "vid": "10c4",
+                    "pid": "ea60",
+                    "serial_number": "abc12345",
+                    "normalized_location": "3-7.3.1",
+                    "product": "CP2102N",
+                }
+            ],
+            "uhubctl_devices": [
+                {
+                    "power_target": "3-7.3:1",
+                    "usb_path": "3-7.3.1",
+                    "vid_pid": "10c4:ea60",
+                    "serial": "abc12345",
+                    "product": "Silicon Labs CP2102N USB to UART Bridge Controller",
+                }
+            ],
+            "registry_devices": [
+                {"id": "a4c91f2b", "name": "board", "tags": ["fpga", "uart"]},
+            ],
+        },
+    }
+
+    nonverbose = _format_result(result, Namespace(command="doctor", verbose=False))
+    verbose = _format_result(result, Namespace(command="doctor", verbose=True))
+
+    assert "Pyserial devices:" not in nonverbose
+    assert "Pyserial devices:" in verbose
+    assert "/dev/ttyUSB0" in verbose
+    assert "Uhubctl devices:" in verbose
+    assert "3-7.3:1" in verbose
+    assert "Registry devices:" in verbose
+    assert "a4c91f2b" in verbose
 
 
 def test_format_devices_uses_table_for_registered_and_discovered():
@@ -125,3 +170,27 @@ def test_format_api_key_create_and_list():
     assert "Secret: sbdev_secret" in create_text
     assert "autograder" in list_text
     assert "Autograder" in list_text
+
+
+def test_main_reports_missing_socket_without_traceback(tmp_path, capsys):
+    missing_socket = tmp_path / "missing.sock"
+
+    code = main(["--socket", str(missing_socket), "devices"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert f"socket not found: {missing_socket}" in captured.err
+    assert "SBDEVD_SOCKET" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_reports_missing_socket_as_json(tmp_path, capsys):
+    missing_socket = tmp_path / "missing.sock"
+
+    code = main(["--socket", str(missing_socket), "--json", "devices"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 2
+    assert payload["error"]["code"] == "socket_connection_error"
+    assert str(missing_socket) in payload["error"]["message"]

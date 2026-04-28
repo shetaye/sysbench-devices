@@ -100,32 +100,32 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --attr-match=subsystem=usb
 ```
 
-Install the daemon as the `sbdev` user. Resolve `uv` before `sudo`; many hosts
-use sudo's `secure_path`, so `sudo uv ...` may not find a per-user install such
-as `~/.local/bin/uv`. This puts the daemon tool environment and executable in
-`sbdev`'s own home directory, not in a root-owned tool directory.
+Install and start the daemon service:
 
 ```sh
-UV="$(command -v uv)"
-PROJECT_DIR="$(pwd)"
-sudo -u sbdev -H env \
-  UV_TOOL_DIR=/var/lib/sysbench-devices/.local/share/uv/tools \
-  UV_TOOL_BIN_DIR=/var/lib/sysbench-devices/.local/bin \
-  "$UV" tool install --python 3.14 "$PROJECT_DIR"
-sudo -u sbdev -H /var/lib/sysbench-devices/.local/bin/sbdevd --help
+./setup.sh
 ```
 
-`uv tool install` installs every console script from this package. Keep the
-`sbdev` install for the daemon and point systemd only at `sbdevd`. Let operators
-install their own CLI/MCP tools:
+`setup.sh` creates or updates the `sbdev` service user, removes old global
+`/usr/local/bin/sbdev*` wrapper symlinks, stages source under
+`/var/lib/sysbench-devices/src`, installs the package as `sbdev`, writes the
+systemd unit, and restarts `sbdevd`.
+
+Override defaults with environment variables when needed:
 
 ```sh
-uv tool install --python 3.14 /path/to/sysbench-devices
+SBDEVD_GROUP=dialout SBDEVD_HTTP_PORT=8765 ./setup.sh
+```
+
+Install operator CLI/MCP tools separately:
+
+```sh
+uv tool install --force --reinstall --refresh --python 3.14 /path/to/sysbench-devices
 sbdevctl --help
 sbdevmcp --help
 ```
 
-Install the system service:
+The generated system service uses:
 
 ```ini
 # /etc/systemd/system/sbdevd.service
@@ -148,13 +148,6 @@ Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
-```
-
-Start it:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now sbdevd
 ```
 
 ## Configuration via `sbdevctl`
@@ -268,8 +261,17 @@ Check these results:
 - `uhubctl.installed`: install `uhubctl` if it is missing.
 - `uhubctl.usable`: fix udev/group permissions or run `sbdevd` with sudo.
 - `registry`: fix the registry path or file permissions.
-- `socket`: fix the socket directory path or ownership.
-- `http`: fix the bind host or port.
+- `socket_path`: fix the socket directory path or ownership.
+
+Use `doctor --verbose` to debug discovery joins. It prints devices reported by
+pyserial, devices parsed from `uhubctl`, and devices found in the registry.
+
+If `sbdevctl` reports a missing socket, point it at the system daemon:
+
+```sh
+export SBDEVD_SOCKET=/run/sysbench-devices/sbdevd.sock
+sbdevctl devices
+```
 
 Verify hub permissions at the same boundary the daemon uses:
 

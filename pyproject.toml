@@ -19,6 +19,9 @@ dev = [
     "pytest>=9.0.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["sysbench_devices*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

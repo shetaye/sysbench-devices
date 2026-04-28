@@ -64,6 +64,25 @@ SBDEVD_HTTP_PORT=8765
 SBDEVD_LOG_LEVEL=INFO
 ```
 
+Create the service user before installing the systemd unit. Replace `dialout`
+with the group used in your udev rule if needed.
+
+```sh
+sudo useradd --system \
+  --home-dir /var/lib/sysbench-devices \
+  --create-home \
+  --shell /usr/sbin/nologin \
+  --groups dialout \
+  sbdev
+sudo install -d -o sbdev -g dialout -m 0755 /var/lib/sysbench-devices
+```
+
+If the user already exists, add it to the hardware-access group:
+
+```sh
+sudo usermod -a -G dialout sbdev
+```
+
 Configure udev so `uhubctl` works without sudo. Replace `2109` with the vendor
 ID for each controllable hub.
 
@@ -77,12 +96,36 @@ SUBSYSTEM=="usb", DRIVER=="hub|usb", ATTR{idVendor}=="2109", RUN+="/bin/sh -c 'c
 Apply the rule:
 
 ```sh
-sudo usermod -a -G dialout sbdev
 sudo udevadm control --reload-rules
 sudo udevadm trigger --attr-match=subsystem=usb
 ```
 
-Install a system service after `sbdevd` is on `PATH`:
+Install the daemon as the `sbdev` user. Resolve `uv` before `sudo`; many hosts
+use sudo's `secure_path`, so `sudo uv ...` may not find a per-user install such
+as `~/.local/bin/uv`. This puts the daemon tool environment and executable in
+`sbdev`'s own home directory, not in a root-owned tool directory.
+
+```sh
+UV="$(command -v uv)"
+PROJECT_DIR="$(pwd)"
+sudo -u sbdev -H env \
+  UV_TOOL_DIR=/var/lib/sysbench-devices/.local/share/uv/tools \
+  UV_TOOL_BIN_DIR=/var/lib/sysbench-devices/.local/bin \
+  "$UV" tool install --python 3.14 "$PROJECT_DIR"
+sudo -u sbdev -H /var/lib/sysbench-devices/.local/bin/sbdevd --help
+```
+
+`uv tool install` installs every console script from this package. Keep the
+`sbdev` install for the daemon and point systemd only at `sbdevd`. Let operators
+install their own CLI/MCP tools:
+
+```sh
+uv tool install --python 3.14 /path/to/sysbench-devices
+sbdevctl --help
+sbdevmcp --help
+```
+
+Install the system service:
 
 ```ini
 # /etc/systemd/system/sbdevd.service
@@ -100,7 +143,7 @@ Environment=SBDEVD_REGISTRY=/var/lib/sysbench-devices/registry.toml
 Environment=SBDEVD_SOCKET=/run/sysbench-devices/sbdevd.sock
 Environment=SBDEVD_HTTP_HOST=127.0.0.1
 Environment=SBDEVD_HTTP_PORT=8765
-ExecStart=/usr/local/bin/sbdevd
+ExecStart=/var/lib/sysbench-devices/.local/bin/sbdevd
 Restart=on-failure
 
 [Install]

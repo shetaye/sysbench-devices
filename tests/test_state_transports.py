@@ -26,21 +26,22 @@ class StaticDiscovery(DiscoveryBackend):
 def make_state(tmp_path):
     store = RegistryStore(tmp_path / "registry.toml")
     key = create_api_key("autograder", "Autograder")
+    other_key = create_api_key("worker", "Worker")
     store.save(
         RegistryData(
             devices=(DeviceRegistration(id="a4c91f2b", name="board", tags=("fpga", "uart")),),
-            api_keys=(key.record,),
+            api_keys=(key.record, other_key.record),
         )
     )
     state = DeviceStateStore(
         registry=store,
         discovery=StaticDiscovery(RuntimeDevice(id="a4c91f2b", serial_port="/dev/ttyUSB0", power_target="1-1:1")),
     )
-    return state, key.secret
+    return state, key.secret, other_key.secret
 
 
 def test_socket_reservation_uses_admin_attribution(tmp_path):
-    state, _secret = make_state(tmp_path)
+    state, _secret, _other_secret = make_state(tmp_path)
 
     reservation = dispatch_socket_method(state, "reserve", {"device_id": "a4c91f2b"})
 
@@ -49,7 +50,7 @@ def test_socket_reservation_uses_admin_attribution(tmp_path):
 
 
 def test_socket_rpc_server_smoke(tmp_path):
-    state, _secret = make_state(tmp_path)
+    state, _secret, _other_secret = make_state(tmp_path)
     socket_path = tmp_path / "sbdevd.sock"
     server = SocketRPCServer(socket_path, state)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -66,7 +67,7 @@ def test_socket_rpc_server_smoke(tmp_path):
 
 
 def test_http_reservation_uses_api_key_attribution(tmp_path):
-    state, secret = make_state(tmp_path)
+    state, secret, _other_secret = make_state(tmp_path)
     server = SysbenchHTTPServer(("127.0.0.1", 0), state)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -84,7 +85,7 @@ def test_http_reservation_uses_api_key_attribution(tmp_path):
 
 
 def test_http_rejects_reservation_without_api_key(tmp_path):
-    state, _secret = make_state(tmp_path)
+    state, _secret, _other_secret = make_state(tmp_path)
     server = SysbenchHTTPServer(("127.0.0.1", 0), state)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -108,7 +109,7 @@ def test_http_rejects_reservation_without_api_key(tmp_path):
 
 
 def test_http_rejects_serial_read_without_api_key(tmp_path):
-    state, secret = make_state(tmp_path)
+    state, secret, _other_secret = make_state(tmp_path)
     server = SysbenchHTTPServer(("127.0.0.1", 0), state)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -129,3 +130,36 @@ def test_http_rejects_serial_read_without_api_key(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_http_rejects_release_by_different_api_key(tmp_path):
+    state, secret, other_secret = make_state(tmp_path)
+    server = SysbenchHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        owner = SysbenchDevicesClient(base_url=base_url, api_key=secret)
+        other = SysbenchDevicesClient(base_url=base_url, api_key=other_secret)
+        reservation = owner.reserve(device_id="a4c91f2b")
+        try:
+            other.release(reservation["id"])
+        except RuntimeError as exc:
+            assert "conflict" in str(exc)
+        else:
+            raise AssertionError("expected release by different API key to fail")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert [reservation.id for reservation in state.list_reservations()] == [reservation["id"]]
+
+
+def test_socket_admin_can_release_api_key_reservation(tmp_path):
+    state, secret, _other_secret = make_state(tmp_path)
+    reservation = state.reserve(state.attribution_for_api_key(secret), device_id="a4c91f2b")
+
+    dispatch_socket_method(state, "release", {"reservation_id": reservation.id})
+
+    assert state.list_reservations() == ()

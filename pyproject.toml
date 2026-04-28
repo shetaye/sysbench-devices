@@ -1,0 +1,24 @@
+[project]
+name = "sysbench-devices"
+version = "0.1.0"
+description = "Local daemon, CLI, SDK, and MCP service for UART-attached sysbench devices"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mcp>=1.0.0",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+sbdevd = "sysbench_devices.daemon:main"
+sbdevctl = "sysbench_devices.ctl:main"
+sbdevmcp = "sysbench_devices.mcp:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

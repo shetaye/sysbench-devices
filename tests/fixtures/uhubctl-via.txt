@@ -1,0 +1,20 @@
+Current status for hub 4-2.3 [2109:0817 VIA Labs, Inc. USB3.0 Hub, USB 3.10, 4 ports, ppps]
+  Port 1: 02a0 power 5gbps Rx.Detect
+  Port 2: 02a0 power 5gbps Rx.Detect
+  Port 3: 02a0 power 5gbps Rx.Detect
+  Port 4: 02a0 power 5gbps Rx.Detect
+Current status for hub 4-2 [2109:0817 VIA Labs, Inc. USB3.0 Hub, USB 3.10, 4 ports, ppps]
+  Port 1: 02a0 power 5gbps Rx.Detect
+  Port 2: 02a0 power 5gbps Rx.Detect
+  Port 3: 0243 power 5gbps U2 enable connect [2109:0817 VIA Labs, Inc. USB3.0 Hub, USB 3.10, 4 ports, ppps]
+  Port 4: 02a0 power 5gbps Rx.Detect
+Current status for hub 3-7.3 [2109:2817 VIA Labs, Inc. USB2.0 Hub, USB 2.10, 4 ports, ppps]
+  Port 1: 0103 power enable connect [10c4:ea60 Silicon Labs CP2102N USB to UART Bridge Controller 1c762f96c112f01180c07074801f8d56]
+  Port 2: 0103 power enable connect [10c4:ea60 Silicon Labs CP2102N USB to UART Bridge Controller 1cd52172c112f011b2696574801f8d56]
+  Port 3: 0103 power enable connect [10c4:ea60 Silicon Labs CP2102N USB to UART Bridge Controller f85f508cc112f011b1506874801f8d56]
+  Port 4: 0103 power enable connect [10c4:ea60 Silicon Labs CP2102N USB to UART Bridge Controller 18834676c112f01186446a74801f8d56]
+Current status for hub 3-7 [2109:2817 VIA Labs, Inc. USB2.0 Hub, USB 2.10, 4 ports, ppps]
+  Port 1: 0100 power
+  Port 2: 0100 power
+  Port 3: 0503 power highspeed enable connect [2109:2817 VIA Labs, Inc. USB2.0 Hub, USB 2.10, 4 ports, ppps]
+  Port 4: 0100 power

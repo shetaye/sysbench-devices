@@ -4,6 +4,8 @@ Manage UART-attached sysbench devices through a local daemon, a control CLI, an
 HTTP/WebSocket SDK, and an MCP server. Use USB hub power control, serial
 sessions, device registration, and attributed reservations from one host process.
 
+Primarily designed for CS 140E/240LX/340LX use & the SysBench benchmark.
+
 ## tl;dr
 
 Run a local daemon without systemd:
